@@ -292,14 +292,23 @@ export async function startCaptureFlow(source, onDone) {
       annotationNote: annoRes.annotationNote
     });
     console.log('[RecallFox] createScreenshotItem result:', res);
-    if (res.ok) {
+    // v1.2.0: Toast akurat berdasarkan status sync
+    if (res.ok && res.synced) {
       showToast('✓ Tersimpan & tersinkron');
-      // Switch ke media tab + refresh
+    } else if (res.ok && res.partial) {
+      // vault_items saved, but Storage upload failed — retry in background
+      showToast('⚠ Tersimpan — gambar sedang diupload ulang', true);
+    } else if (!res.ok && res.localOnly) {
+      // Hanya tersimpan lokal — sync gagal, akan retry otomatis
+      showToast('⚠ Tersimpan lokal — sync cloud gagal, akan retry otomatis', true);
+    } else if (!res.ok) {
+      showToast('Gagal: ' + (res.error || 'unknown'), true);
+    }
+    // Tetap refresh list supaya item muncul (meski hanya lokal)
+    if (res.ok || res.localOnly) {
       if (window.__rfNavigate) window.__rfNavigate('media');
       else refreshList();
       if (onDone) onDone();
-    } else {
-      showToast('Gagal: ' + (res.error || 'unknown'), true);
     }
   } catch (e) {
     console.error('[RecallFox] save failed:', e);
