@@ -1,21 +1,24 @@
 // src/views/notes.js — Notes tab: list + editor + batch operations
+// v1.1.0: Render to #appMain (bukan #app) supaya bottom nav + FAB persist.
+// v1.1.0: openNoteEditor dipanggil dari FAB menu (tombol + → Catatan Baru).
+// v1.1.0: Tambah "Copy Teks Saja" di batch mode.
 
 import { createNote, updateNote, deleteNote } from '../sync.js';
 import { dbGetAllNotes } from '../db.js';
 
 const NOTE_COLORS = [
-  { id: 'default', bg: '#ffffff', fg: '#1c1917' },
-  { id: 'yellow',  bg: '#fef9c3', fg: '#713f12' },
-  { id: 'green',   bg: '#dcfce7', fg: '#14532d' },
-  { id: 'blue',    bg: '#dbeafe', fg: '#1e3a8a' },
-  { id: 'pink',    bg: '#fce7f3', fg: '#831843' },
-  { id: 'purple',  bg: '#f3e8ff', fg: '#581c87' },
-  { id: 'orange',  bg: '#fed7aa', fg: '#7c2d12' },
-  { id: 'red',     bg: '#fecaca', fg: '#7f1d1d' },
-  { id: 'teal',    bg: '#ccfbf1', fg: '#134e4a' },
-  { id: 'indigo',  bg: '#e0e7ff', fg: '#312e81' },
-  { id: 'slate',   bg: '#e2e8f0', fg: '#1e293b' },
-  { id: 'rose',    bg: '#ffe4e6', fg: '#881337' }
+  { id: 'default', bg: '#ffffff', fg: '#1c1917', border: '#e7e5e4' },
+  { id: 'yellow',  bg: '#fef9c3', fg: '#713f12', border: '#fde047' },
+  { id: 'green',   bg: '#dcfce7', fg: '#14532d', border: '#86efac' },
+  { id: 'blue',    bg: '#dbeafe', fg: '#1e3a8a', border: '#93c5fd' },
+  { id: 'pink',    bg: '#fce7f3', fg: '#831843', border: '#f9a8d4' },
+  { id: 'purple',  bg: '#f3e8ff', fg: '#581c87', border: '#d8b4fe' },
+  { id: 'orange',  bg: '#fed7aa', fg: '#7c2d12', border: '#fdba74' },
+  { id: 'red',     bg: '#fecaca', fg: '#7f1d1d', border: '#fca5a5' },
+  { id: 'teal',    bg: '#ccfbf1', fg: '#134e4a', border: '#5eead4' },
+  { id: 'indigo',  bg: '#e0e7ff', fg: '#312e81', border: '#a5b4fc' },
+  { id: 'slate',   bg: '#e2e8f0', fg: '#1e293b', border: '#cbd5e1' },
+  { id: 'rose',    bg: '#ffe4e6', fg: '#881337', border: '#fda4af' }
 ];
 
 let _batchMode = false;
@@ -24,28 +27,29 @@ let _onRefresh = null;
 
 export function renderNotes(user, onRefresh) {
   _onRefresh = onRefresh;
-  const app = document.getElementById('app');
-  app.innerHTML = `
+  const main = document.getElementById('appMain');
+  if (!main) return;
+  main.innerHTML = `
     <div class="view-header">
       <h2>📝 Catatan</h2>
       <div class="header-actions">
-        <button class="icon-btn" id="batchToggle">☑️</button>
-        <button class="icon-btn" id="refreshBtn">↻</button>
+        <button class="icon-btn" id="batchToggle" title="Mode batch">☑️</button>
+        <button class="icon-btn" id="refreshBtn" title="Refresh">↻</button>
       </div>
     </div>
     <div class="search-row">
-      <input type="search" id="noteSearch" placeholder="Cari catatan...">
+      <input type="search" id="noteSearch" placeholder="🔍 Cari catatan...">
     </div>
     <div class="batch-bar" id="batchBar" style="display:none">
       <span id="batchCount">0 dipilih</span>
-      <button class="btn btn-secondary" id="batchCopy">📋 Copy</button>
-      <button class="btn btn-danger" id="batchDelete">🗑️ Hapus</button>
-      <button class="btn btn-ghost" id="batchCancel">✕</button>
+      <div class="batch-actions">
+        <button class="btn btn-secondary" id="batchCopy">📋 Copy Teks</button>
+        <button class="btn btn-danger" id="batchDelete">🗑️ Hapus</button>
+        <button class="btn btn-ghost" id="batchCancel">✕</button>
+      </div>
     </div>
     <div class="notes-list" id="notesList"><div class="loading">Memuat...</div></div>
-    <button class="fab" id="fabAdd">+</button>
   `;
-  document.getElementById('fabAdd').addEventListener('click', () => openEditor());
   document.getElementById('refreshBtn').addEventListener('click', () => onRefresh());
   document.getElementById('batchToggle').addEventListener('click', toggleBatchMode);
   document.getElementById('batchCancel').addEventListener('click', () => exitBatchMode());
@@ -70,18 +74,19 @@ async function refreshList() {
     return new Date(b.updated_at) - new Date(a.updated_at);
   });
   if (notes.length === 0) {
-    list.innerHTML = '<div class="empty">Belum ada catatan.<br>Klik + untuk buat.</div>';
+    list.innerHTML = '<div class="empty">📝 Belum ada catatan.<br><br>Ketuk tombol <strong>+</strong> di bawah untuk buat catatan baru.</div>';
     return;
   }
   list.innerHTML = notes.map(note => {
     const color = NOTE_COLORS.find(c => c.id === (note.color || 'default')) || NOTE_COLORS[0];
     const selected = _batchSelected.has(note.id);
+    const body = (note.body || '').slice(0, 120);
     return `
-      <div class="note-card ${selected ? 'selected' : ''}" data-id="${note.id}" style="background:${color.bg};color:${color.fg}">
+      <div class="note-card ${selected ? 'selected' : ''}" data-id="${note.id}" style="background:${color.bg};color:${color.fg};border-color:${color.border}">
         ${_batchMode ? `<div class="check">${selected ? '✓' : ''}</div>` : ''}
         ${note.pinned ? '<div class="pin">📌</div>' : ''}
         <div class="note-title">${escapeHtml(note.title || 'Tanpa judul')}</div>
-        <div class="note-body">${escapeHtml((note.body || '').slice(0, 100))}${note.body?.length > 100 ? '…' : ''}</div>
+        <div class="note-body">${escapeHtml(body)}${note.body?.length > 120 ? '…' : ''}</div>
         <div class="note-meta">
           ${note.group ? `<span class="badge">${escapeHtml(note.group)}</span>` : ''}
           <span>${new Date(note.updated_at).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' })}</span>
@@ -98,7 +103,7 @@ async function refreshList() {
         updateBatchUI();
         refreshList();
       } else {
-        openEditor(id);
+        openNoteEditor(id, _onRefresh);
       }
     });
   });
@@ -108,6 +113,7 @@ function toggleBatchMode() {
   _batchMode = !_batchMode;
   _batchSelected.clear();
   document.getElementById('batchBar').style.display = _batchMode ? 'flex' : 'none';
+  document.getElementById('batchToggle').classList.toggle('active', _batchMode);
   refreshList();
 }
 
@@ -115,6 +121,7 @@ function exitBatchMode() {
   _batchMode = false;
   _batchSelected.clear();
   document.getElementById('batchBar').style.display = 'none';
+  document.getElementById('batchToggle').classList.toggle('active', false);
   refreshList();
 }
 
@@ -123,7 +130,8 @@ function updateBatchUI() {
   if (countEl) countEl.textContent = _batchSelected.size + ' dipilih';
 }
 
-async function openEditor(noteId) {
+// ===== Note editor (dipanggil dari list click atau FAB menu) =====
+export async function openNoteEditor(noteId, onDone) {
   let note = null;
   if (noteId) {
     const all = await dbGetAllNotes();
@@ -140,14 +148,14 @@ async function openEditor(noteId) {
       <div class="modal-body">
         <textarea id="noteBody" placeholder="Tulis catatan...">${escapeHtml(note?.body || '')}</textarea>
         <div class="note-options">
-          <label>Warna:</label>
+          <label>🎨 Warna</label>
           <div class="color-row">
-            ${NOTE_COLORS.map(c => `<button class="color-chip ${c.id === (note?.color || 'default') ? 'active' : ''}" data-color="${c.id}" style="background:${c.bg};border:1px solid ${c.fg}33"></button>`).join('')}
+            ${NOTE_COLORS.map(c => `<button class="color-chip ${c.id === (note?.color || 'default') ? 'active' : ''}" data-color="${c.id}" style="background:${c.bg};border:2px solid ${c.border}"></button>`).join('')}
           </div>
-          <label>Grup:</label>
-          <input type="text" id="noteGroup" placeholder="(opsional)" value="${escapeHtml(note?.group || '')}">
+          <label>📁 Grup / Proyek</label>
+          <input type="text" id="noteGroup" placeholder="(opsional, mis. Rapat, Ide)" value="${escapeHtml(note?.group || '')}">
           <div class="toggle-row">
-            <label><input type="checkbox" id="notePinned" ${note?.pinned ? 'checked' : ''}> 📌 Pin</label>
+            <label><input type="checkbox" id="notePinned" ${note?.pinned ? 'checked' : ''}> 📌 Pin di atas</label>
             <label><input type="checkbox" id="noteArchived" ${note?.archived ? 'checked' : ''}> 🗄️ Arsip</label>
           </div>
         </div>
@@ -171,7 +179,7 @@ async function openEditor(noteId) {
 
   const close = () => {
     modal.classList.remove('open');
-    setTimeout(() => document.body.removeChild(modal), 200);
+    setTimeout(() => { if (modal.parentNode) document.body.removeChild(modal); }, 200);
   };
 
   modal.addEventListener('click', async (e) => {
@@ -185,15 +193,21 @@ async function openEditor(noteId) {
         const group = document.getElementById('noteGroup').value.trim();
         const pinned = document.getElementById('notePinned').checked;
         const archived = document.getElementById('noteArchived').checked;
-        if (note) {
-          await updateNote(window.__rfUser, note.id, { title, body, group, pinned, archived, color: selectedColor });
-        } else {
-          await createNote(window.__rfUser, { title, body, group, pinned, archived, color: selectedColor });
+        showToast('Menyimpan...');
+        try {
+          if (note) {
+            await updateNote(window.__rfUser, note.id, { title, body, group, pinned, archived, color: selectedColor });
+          } else {
+            await createNote(window.__rfUser, { title, body, group, pinned, archived, color: selectedColor });
+          }
+          showToast('✓ Tersimpan & tersinkron');
+          close();
+          if (window.__rfNavigate) window.__rfNavigate('notes');
+          if (onDone) onDone();
+        } catch (e) {
+          console.error('[RecallFox] save note failed:', e);
+          showToast('Gagal: ' + e.message, true);
         }
-        showToast('✓ Tersimpan & tersinkron');
-        close();
-        refreshList();
-        if (_onRefresh) _onRefresh();
         return;
       }
       if (action === 'delete') {
@@ -201,8 +215,7 @@ async function openEditor(noteId) {
         await deleteNote(window.__rfUser, note.id);
         showToast('✓ Dihapus');
         close();
-        refreshList();
-        if (_onRefresh) _onRefresh();
+        if (onDone) onDone();
         return;
       }
     }
@@ -251,5 +264,5 @@ function showToast(msg, isError = false) {
   t.textContent = msg;
   document.body.appendChild(t);
   setTimeout(() => t.classList.add('show'), 10);
-  setTimeout(() => { t.classList.remove('show'); setTimeout(() => document.body.removeChild(t), 300); }, 2500);
+  setTimeout(() => { t.classList.remove('show'); setTimeout(() => { if (t.parentNode) document.body.removeChild(t); }, 300); }, 2500);
 }

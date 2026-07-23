@@ -5,9 +5,10 @@ import { processSyncQueue } from '../sync.js';
 import { dbGetSyncQueue } from '../db.js';
 
 export async function renderSettings(user, onLogout) {
-  const app = document.getElementById('app');
+  const main = document.getElementById('appMain');
+  if (!main) return;
   const queue = await dbGetSyncQueue();
-  app.innerHTML = `
+  main.innerHTML = `
     <div class="view-header">
       <h2>⚙️ Akun</h2>
     </div>

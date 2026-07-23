@@ -19,15 +19,16 @@
 .icon-btn:active { background: var(--border); }
 
 .fab {
-  position: fixed; bottom: calc(80px + var(--safe-bottom)); right: 20px;
+  position: fixed; bottom: calc(72px + var(--safe-bottom) + 16px); right: 20px;
   width: 56px; height: 56px; border-radius: 50%;
   background: var(--primary); color: #fff;
   font-size: 28px; font-weight: 300; line-height: 1;
   display: flex; align-items: center; justify-content: center;
-  box-shadow: var(--shadow-lg); z-index: 50;
+  box-shadow: 0 6px 20px rgba(109, 61, 245, 0.4); z-index: 60;
   transition: transform 0.15s;
+  border: 3px solid #fff;
 }
-.fab:active { transform: scale(0.95); }
+.fab:active { transform: scale(0.92); }
 
 .bottom-sheet {
   position: fixed; inset: 0; z-index: 100;
