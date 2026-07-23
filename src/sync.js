@@ -424,6 +424,127 @@ export async function createDocumentItem(user, payload) {
   };
 }
 
+// ===== v1.4.0: Document multi-page (Fase 5 — batch) =====
+// Upload semua halaman ke Storage, simpan metadata di source.pages
+export async function createDocumentItemMultiPage(user, payload) {
+  // payload: { pages: [{dataUrl, filter, width, height}], title, note }
+  const pages = payload.pages || [];
+  if (pages.length === 0) return { ok: false, error: 'no_pages' };
+
+  const itemId = genId('doc');
+  const now = new Date().toISOString();
+
+  // Thumbnail dari halaman pertama
+  const thumbnailDataUrl = await generateThumbnail(pages[0].dataUrl, 200);
+
+  // Upload semua halaman ke Storage
+  const pageMetas = [];
+  let totalBytes = 0;
+  for (let i = 0; i < pages.length; i++) {
+    const page = pages[i];
+    const path = `user-${user.id}/${itemId}_p${i + 1}.jpg`;
+    let pageUrl = null;
+    try {
+      const blob = await (await fetch(page.dataUrl)).blob();
+      let uploadBlob = blob;
+      if (blob.type !== 'image/jpeg') {
+        const img = await createImageBitmap(blob);
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+        uploadBlob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
+      }
+      const { error: upErr } = await supabase.storage
+        .from(STORAGE_BUCKET)
+        .upload(path, uploadBlob, { contentType: 'image/jpeg', upsert: true });
+      if (!upErr) {
+        pageUrl = `${supabase.supabaseUrl}/storage/v1/object/public/${STORAGE_BUCKET}/${path}`;
+      } else {
+        console.warn(`[RecallFox] Page ${i + 1} upload failed:`, upErr.message);
+      }
+    } catch (e) {
+      console.warn(`[RecallFox] Page ${i + 1} upload exception:`, e.message);
+    }
+    const sizeBytes = Math.round(page.dataUrl.length * 0.75);
+    totalBytes += sizeBytes;
+    pageMetas.push({
+      url: pageUrl,
+      width: page.width || 0,
+      height: page.height || 0,
+      filter: page.filter || 'original',
+      size_bytes: sizeBytes
+    });
+  }
+
+  const row = {
+    id: itemId,
+    user_id: user.id,
+    type: 'document',
+    title: payload.title || `Dokumen ${new Date().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}`,
+    body: '',
+    tags: [],
+    category: null,
+    source: {
+      capturedAt: now,
+      device: 'pwa-mobile',
+      annotationNote: payload.note || '',
+      pages: pageMetas
+    },
+    screenshot_mode: 'document',
+    screenshot_width: pageMetas[0]?.width || 0,
+    screenshot_height: pageMetas[0]?.height || 0,
+    screenshot_format: 'jpeg',
+    screenshot_bytes: totalBytes,
+    thumbnail_data_url: thumbnailDataUrl,
+    gdrive_file_id: pageMetas[0]?.url ? `user-${user.id}/${itemId}_p1.jpg` : null,
+    gdrive_file_url: pageMetas[0]?.url || null,
+    toppings: [],
+    variables: [],
+    favorite: false,
+    archived: false,
+    use_count: 0,
+    last_used_at: null,
+    created_at: now,
+    updated_at: now,
+    deleted_at: null,
+    device_id: getDeviceId()
+  };
+
+  // Insert ke vault_items
+  let upsertOk = false;
+  let upsertError = null;
+  try {
+    const { data: upsertData, error } = await supabase.from(VAULT_TABLE).upsert(row).select();
+    console.log('[RecallFox] document upsert result:', { error: error?.message, hasData: !!upsertData });
+    if (error) {
+      upsertError = error.message;
+      await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
+    } else {
+      upsertOk = true;
+    }
+  } catch (e) {
+    upsertError = e.message;
+    await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
+  }
+
+  // Cache ke IndexedDB
+  await dbPutVaultItem(row);
+  // Cache halaman pertama ke screenshot_blobs (untuk preview cepat di list)
+  await dbPutScreenshotBlob(itemId, pages[0].dataUrl);
+
+  return {
+    ok: upsertOk,
+    item: row,
+    synced: upsertOk,
+    pageCount: pages.length,
+    upsertError
+  };
+}
+
 // ===== Notes CRUD =====
 export async function createNote(user, payload) {
   const noteId = genId('n');

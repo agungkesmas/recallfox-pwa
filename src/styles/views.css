@@ -384,3 +384,117 @@
 @media (min-width: 900px) {
   .media-grid { grid-template-columns: repeat(4, 1fr); }
 }
+
+/* ===== v1.4.0: Document editor multi-page (Fase 5) ===== */
+.rf-doc-overlay-v14 .rf-doc-page-nav {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; background: #1c1917;
+  border-top: 1px solid rgba(255,255,255,0.1);
+  overflow-x: auto;
+}
+.rf-doc-nav-btn {
+  flex-shrink: 0; width: 36px; height: 36px; border-radius: 50%;
+  background: rgba(255,255,255,0.1); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px;
+}
+.rf-doc-add-page {
+  flex-shrink: 0; padding: 8px 14px; border-radius: 20px;
+  background: var(--primary); color: #fff; font-size: 13px; font-weight: 600;
+  display: flex; align-items: center; gap: 4px;
+}
+.rf-doc-thumbs {
+  display: flex; gap: 6px; overflow-x: auto; flex: 1;
+  scrollbar-width: thin;
+}
+.rf-doc-thumb {
+  position: relative; flex-shrink: 0;
+  width: 48px; height: 48px; border-radius: 6px;
+  overflow: hidden; border: 2px solid transparent;
+  cursor: pointer; background: #000;
+}
+.rf-doc-thumb.active { border-color: var(--primary); }
+.rf-doc-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.rf-doc-thumb-num {
+  position: absolute; bottom: 2px; right: 2px;
+  background: rgba(0,0,0,0.7); color: #fff;
+  font-size: 9px; padding: 1px 4px; border-radius: 3px;
+}
+.rf-doc-thumb-del {
+  position: absolute; top: 2px; right: 2px;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: var(--danger); color: #fff;
+  font-size: 9px; padding: 0; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.rf-doc-loading {
+  position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  background: rgba(0,0,0,0.85); color: #fff;
+  padding: 16px 24px; border-radius: 12px;
+  font-size: 13px; text-align: center;
+  z-index: 100;
+}
+
+/* ===== v1.4.0: Document viewer multi-page (Fase 6) ===== */
+.modal-doc-viewer .modal-card-doc-viewer {
+  max-width: 600px; max-height: 95vh;
+}
+.modal-doc-viewer .doc-viewer-pages {
+  position: relative;
+  background: var(--bg);
+  border-radius: 8px;
+  min-height: 300px;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+}
+.modal-doc-viewer .doc-page-image {
+  max-width: 100%; max-height: 60vh;
+  object-fit: contain; border-radius: 4px;
+  box-shadow: var(--shadow);
+}
+.modal-doc-viewer .doc-viewer-loading {
+  padding: 40px 20px; color: var(--text-muted); text-align: center;
+}
+.modal-doc-viewer .doc-pagination {
+  display: flex; justify-content: center; gap: 6px;
+  padding: 10px 0 0;
+}
+.modal-doc-viewer .doc-page-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--border); cursor: pointer; transition: background 0.15s;
+}
+.modal-doc-viewer .doc-page-dot.active { background: var(--primary); }
+.modal-doc-viewer .doc-page-indicator {
+  flex: 1; text-align: center; font-size: 13px; color: var(--text-muted);
+  padding: 0 12px;
+}
+
+/* ===== v1.4.0: Compress modal (Fase 1) ===== */
+.modal-compress .compress-preview {
+  background: var(--bg); border-radius: 8px; padding: 12px;
+  text-align: center; margin-bottom: 12px;
+}
+.modal-compress .compress-preview img {
+  max-width: 100%; max-height: 200px; object-fit: contain;
+  border-radius: 4px;
+}
+.modal-compress .compress-stats {
+  display: flex; justify-content: space-around;
+  padding: 10px; background: var(--bg); border-radius: 8px;
+  margin-bottom: 12px; font-size: 12px;
+}
+.modal-compress .compress-stats strong { display: block; font-size: 14px; margin-top: 2px; }
+.modal-compress .compress-controls {
+  display: flex; flex-direction: column; gap: 12px;
+}
+.modal-compress .compress-controls label {
+  font-size: 12px; color: var(--text-muted); font-weight: 600;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.modal-compress .compress-controls input[type="range"] {
+  width: 100%; padding: 0; margin-top: 4px;
+}
+.modal-compress .compress-controls select {
+  padding: 8px 12px; border-radius: 6px;
+  border: 1px solid var(--border); background: var(--surface);
+}

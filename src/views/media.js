@@ -4,12 +4,14 @@
 // v1.1.0: Tambah "Copy Teks Saja" di batch mode.
 // v1.3.0: Tambah type='document' (CamScanner-like) — list display + viewer + startDocumentFlow
 
-import { deleteVaultItem, getOrDownloadScreenshotBlob, createScreenshotItem, createDocumentItem } from '../sync.js';
+import { deleteVaultItem, getOrDownloadScreenshotBlob, createScreenshotItem, createDocumentItem, createDocumentItemMultiPage } from '../sync.js';
 import { buildScreenshotCaption, buildBatchCaption, writeScreenshotToClipboard } from '../copy-format.js';
 import { dbGetAllVaultItems } from '../db.js';
 import { pickImage, pasteFromClipboard } from '../capture.js';
 import { openAnnotateEditor } from '../annotate.js';
 import { openDocumentEditor } from '../document.js';
+import { openDocumentEditorMultiPage } from '../document-editor-v14.js';
+import { openDocumentViewer } from '../document-viewer.js';
 
 let _batchMode = false;
 let _batchSelected = new Set();
@@ -136,9 +138,9 @@ async function openItemDetail(id) {
   const items = await dbGetAllVaultItems();
   const item = items.find(i => i.id === id);
   if (!item) return;
-  // v1.3.0: Route ke document viewer kalau type='document'
+  // v1.4.0: Route ke multi-page document viewer kalau type='document'
   if (item.type === 'document') {
-    openDocumentDetail(item);
+    openDocumentViewer(item, refreshList);
     return;
   }
   showToast('Memuat gambar...');
@@ -442,56 +444,39 @@ export async function startDocumentFlow(source, onDone) {
   }
   if (!picked) return;
 
-  // Buka document editor (CamScanner-like)
+  // v1.4.0: Buka multi-page document editor (Fase 4-5: auto-detect + batch)
   let docRes;
   try {
-    docRes = await openDocumentEditor(picked.dataUrl, {});
+    docRes = await openDocumentEditorMultiPage(picked.dataUrl, {});
   } catch (e) {
     console.error('[RecallFox] document editor failed:', e);
     showToast('Editor dokumen gagal: ' + e.message, true);
     return;
   }
-  if (docRes.cancelled) return;
+  if (docRes.cancelled || !docRes.pages || docRes.pages.length === 0) return;
 
-  const finalDataUrl = docRes.dataUrl;
-  showToast('Menyimpan dokumen...');
+  showToast(`Menyimpan ${docRes.pages.length} halaman...`);
 
   if (!window.__rfUser) {
     showToast('Sesi habis. Login ulang.', true);
     return;
   }
 
-  // Compute final dimensions
-  const finalImg = new Image();
-  await new Promise((r) => {
-    finalImg.onload = r;
-    finalImg.src = finalDataUrl;
-  });
-
   try {
-    const res = await createDocumentItem(window.__rfUser, {
-      dataUrl: finalDataUrl,
-      width: finalImg.naturalWidth,
-      height: finalImg.naturalHeight,
-      filter: docRes.filter,
+    const res = await createDocumentItemMultiPage(window.__rfUser, {
+      pages: docRes.pages,
       title: docRes.title,
       note: docRes.note
     });
-    console.log('[RecallFox] createDocumentItem result:', res);
-    if (res.ok && res.synced) {
-      showToast('✓ Dokumen tersimpan & tersinkron');
-    } else if (res.ok && res.partial) {
-      showToast('⚠ Dokumen tersimpan — gambar sedang diupload ulang', true);
-    } else if (!res.ok && res.localOnly) {
-      showToast('⚠ Tersimpan lokal — sync cloud gagal, akan retry otomatis', true);
-    } else if (!res.ok) {
-      showToast('Gagal: ' + (res.error || 'unknown'), true);
+    console.log('[RecallFox] createDocumentItemMultiPage result:', res);
+    if (res.ok) {
+      showToast(`✓ ${docRes.pages.length} halaman tersimpan & tersinkron`);
+    } else {
+      showToast('⚠ Tersimpan lokal — sync cloud gagal: ' + (res.upsertError || 'unknown'), true);
     }
-    if (res.ok || res.localOnly) {
-      if (window.__rfNavigate) window.__rfNavigate('media');
-      else refreshList();
-      if (onDone) onDone();
-    }
+    if (window.__rfNavigate) window.__rfNavigate('media');
+    else refreshList();
+    if (onDone) onDone();
   } catch (e) {
     console.error('[RecallFox] save document failed:', e);
     showToast('Gagal simpan dokumen: ' + e.message, true);
