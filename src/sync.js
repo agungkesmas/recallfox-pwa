@@ -152,7 +152,8 @@ export async function createScreenshotItem(user, payload) {
       url: payload.sourceUrl || null,
       title: payload.sourceTitle || 'HP Capture',
       capturedAt: now,
-      device: 'pwa-mobile'
+      device: 'pwa-mobile',
+      annotationNote: payload.annotationNote || ''  // simpan di source (bukan column)
     },
     screenshot_mode: payload.mode || 'selection',
     screenshot_width: payload.width || 0,
@@ -162,7 +163,8 @@ export async function createScreenshotItem(user, payload) {
     thumbnail_data_url: thumbnailDataUrl,
     gdrive_file_id: upRes.ok ? upRes.path : null,
     gdrive_file_url: upRes.ok ? upRes.url : null,
-    annotation_note: payload.annotationNote || null,
+    // annotation_note TIDAK dikirim — column tidak ada di DB actual.
+    // Catatan anotasi disimpan di source.annotationNote (JSONB).
     toppings: [],
     variables: [],
     favorite: false,
@@ -176,8 +178,10 @@ export async function createScreenshotItem(user, payload) {
   };
 
   // Insert ke Supabase
-  const { error } = await supabase.from(VAULT_TABLE).upsert(row);
+  const { data: upsertData, error } = await supabase.from(VAULT_TABLE).upsert(row).select();
+  console.log('[RecallFox] upsert result:', { error: error?.message, hasData: !!upsertData });
   if (error) {
+    console.error('[RecallFox] upsert FAILED — enqueuing for retry. Row:', { id: row.id, type: row.type });
     await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
   }
 

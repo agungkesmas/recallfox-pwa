@@ -63,7 +63,7 @@ async function refreshList() {
       const selected = _batchSelected.has(item.id);
       const thumb = item.thumbnail_data_url || '';
       const date = new Date(item.created_at).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' });
-      const hasNote = item.annotation_note ? '<span class="has-note">📝</span>' : '';
+      const hasNote = (item.annotation_note || item.source?.annotationNote) ? '<span class="has-note">📝</span>' : '';
       return `
         <div class="media-card ${selected ? 'selected' : ''}" data-id="${item.id}">
           ${_batchMode ? `<div class="check">${selected ? '✓' : ''}</div>` : ''}
@@ -214,7 +214,7 @@ async function doBatchCopy(mode) {
         : item.screenshot_mode === 'entire' ? 'Seluruh halaman'
         : (item.screenshot_mode || '-');
       const dims = (item.screenshot_width || 0) + '×' + (item.screenshot_height || 0) + ' px';
-      const annotationNote = item.annotation_note || '';
+      const annotationNote = item.annotation_note || item.annotationNote || item.source?.annotationNote || '';
       const pageUrl = item.source?.url || '';
       const dateStr = new Date(capturedAt).toLocaleString('id-ID', { dateStyle: 'full', timeStyle: 'short' });
       let s_text = `${i + 1}. ${pageTitle}\n`;

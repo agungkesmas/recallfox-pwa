@@ -23,7 +23,7 @@ export function buildScreenshotCaption(item, dataUrl, opts = {}) {
     : modeRaw === 'entire' ? 'Seluruh halaman'
     : modeRaw;
   const dims = (item.screenshot_width || item.screenshotWidth || 0) + '×' + (item.screenshot_height || item.screenshotHeight || 0) + ' px';
-  const annotationNote = item.annotation_note || item.annotationNote || item.source?.annotationNote || '';
+  const annotationNote = item.annotation_note || item.annotationNote || item.source?.annotationNote || item.source?.annotation_note || '';
   const capturedDateStr = new Date(capturedAt).toLocaleString('id-ID', { dateStyle: 'full', timeStyle: 'short' });
 
   const index = opts.index;
