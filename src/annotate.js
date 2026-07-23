@@ -1,6 +1,6 @@
 // src/annotate.js — Annotation editor (PORT dari addon content/annotate.js)
-// Mobile-friendly: toolbar di bawah, touch events, 8 tools.
-// Tools: arrow, line, rect, ellipse, text, highlight, blur, pen
+// Mobile-friendly: toolbar di bawah, touch events, 8 tools + Kompres (v1.3.0).
+// Tools: arrow, line, rect, ellipse, text, highlight, blur, pen, + Kompres
 
 const TOOLS = [
   { id: 'pen',       icon: '✏️', label: 'Pena' },
@@ -11,6 +11,14 @@ const TOOLS = [
   { id: 'text',      icon: 'T',  label: 'Teks' },
   { id: 'highlight', icon: '🖍️', label: 'Highlight' },
   { id: 'blur',      icon: '🌫️', label: 'Blur' }
+];
+
+// v1.3.0: Compression presets — quick one-tap compress
+const COMPRESS_PRESETS = [
+  { id: 'light',  label: 'Ringan',  quality: 0.85, maxDim: 2560, desc: 'Kualitas tinggi' },
+  { id: 'medium', label: 'Sedang',  quality: 0.70, maxDim: 1920, desc: 'Seimbang (default)' },
+  { id: 'strong', label: 'Kuat',    quality: 0.55, maxDim: 1280, desc: 'Hemat kuota' },
+  { id: 'custom', label: 'Custom',  quality: 0.70, maxDim: 1920, desc: 'Atur sendiri' }
 ];
 
 const COLORS = ['#ef4444', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899', '#000000', '#ffffff'];
@@ -64,6 +72,7 @@ export function openAnnotateEditor(dataUrl, opts = {}) {
         <div class="rf-anno-actions">
           <button class="rf-anno-btn" data-action="undo">↶</button>
           <button class="rf-anno-btn" data-action="redo">↷</button>
+          <button class="rf-anno-btn rf-anno-compress" data-action="compress" title="Kompresi">🗜️</button>
           <button class="rf-anno-btn rf-anno-danger" data-action="clear">🗑️</button>
         </div>
       </div>
@@ -349,12 +358,274 @@ export function openAnnotateEditor(dataUrl, opts = {}) {
         restoreRedoState();
       } else if (action === 'clear') {
         clearAll();
+      } else if (action === 'compress') {
+        // v1.3.0: Buka modal kompresi
+        openCompressModal();
       }
     });
+
+    // ===== v1.3.0: Compression Modal =====
+    function openCompressModal() {
+      // Composite dulu draw onto bg supaya preview = hasil akhir (sebelum compress)
+      const previewCanvas = document.createElement('canvas');
+      previewCanvas.width = imgWidth;
+      previewCanvas.height = imgHeight;
+      const previewCtx = previewCanvas.getContext('2d');
+      previewCtx.drawImage(bgCanvas, 0, 0);
+      previewCtx.drawImage(drawCanvas, 0, 0);
+      const currentDataUrl = previewCanvas.toDataURL('image/png');
+      const currentBytes = Math.round(currentDataUrl.length * 0.75); // approx base64 → bytes
+
+      // Default preset: medium
+      let selectedPreset = 'medium';
+      let customQuality = 0.70;
+      let customMaxDim = 1920;
+      let customFormat = 'image/jpeg';
+
+      const modal = document.createElement('div');
+      modal.className = 'rf-compress-overlay';
+      modal.innerHTML = `
+        <div class="rf-compress-card">
+          <div class="rf-compress-header">
+            <h3>🗜️ Kompresi Gambar</h3>
+            <button class="rf-compress-close" data-action="cancel">✕</button>
+          </div>
+          <div class="rf-compress-body">
+            <div class="rf-compress-current">
+              <div>Ukuran saat ini</div>
+              <div class="rf-compress-size" id="rfCurSize">${formatBytes(currentBytes)}</div>
+            </div>
+
+            <div class="rf-compress-presets">
+              ${COMPRESS_PRESETS.map(p => `
+                <button class="rf-preset-btn ${p.id === selectedPreset ? 'active' : ''}" data-preset="${p.id}">
+                  <div class="rf-preset-name">${p.label}</div>
+                  <div class="rf-preset-desc">${p.desc}</div>
+                </button>
+              `).join('')}
+            </div>
+
+            <div class="rf-compress-custom" id="rfCustomPanel" style="display:none">
+              <div class="rf-compress-field">
+                <label>Quality: <span id="rfQualityVal">70%</span></label>
+                <input type="range" min="10" max="100" value="70" id="rfQuality" class="rf-range">
+              </div>
+              <div class="rf-compress-field">
+                <label>Max dimensi: <span id="rfMaxDimVal">1920px</span></label>
+                <select id="rfMaxDim" class="rf-select">
+                  <option value="4096">4096px (asli)</option>
+                  <option value="2560" selected>2560px</option>
+                  <option value="1920">1920px</option>
+                  <option value="1280">1280px</option>
+                  <option value="1024">1024px</option>
+                  <option value="768">768px</option>
+                </select>
+              </div>
+              <div class="rf-compress-field">
+                <label>Format:</label>
+                <select id="rfFormat" class="rf-select">
+                  <option value="image/jpeg" selected>JPEG (lebih kecil)</option>
+                  <option value="image/webp">WebP (modern, kecil)</option>
+                  <option value="image/png">PNG (lossless, besar)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="rf-compress-preview">
+              <div class="rf-compress-arrow">→</div>
+              <div class="rf-compress-result">
+                <div class="rf-compress-result-label">Hasil estimasi</div>
+                <div class="rf-compress-result-size" id="rfResultSize">—</div>
+                <div class="rf-compress-result-saved" id="rfResultSaved"></div>
+              </div>
+            </div>
+          </div>
+          <div class="rf-compress-footer">
+            <button class="btn btn-ghost" data-action="cancel">Batal</button>
+            <button class="btn btn-primary" data-action="apply">Terapkan</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(modal);
+      setTimeout(() => modal.classList.add('open'), 10);
+
+      const qualityInput = modal.querySelector('#rfQuality');
+      const maxDimSelect = modal.querySelector('#rfMaxDim');
+      const formatSelect = modal.querySelector('#rfFormat');
+      const customPanel = modal.querySelector('#rfCustomPanel');
+      const resultSizeEl = modal.querySelector('#rfResultSize');
+      const resultSavedEl = modal.querySelector('#rfResultSaved');
+
+      // Recompute preview whenever preset/quality/dim/format changes
+      let previewTimer = null;
+      async function updatePreview() {
+        const preset = COMPRESS_PRESETS.find(p => p.id === selectedPreset);
+        let q, maxD, fmt;
+        if (selectedPreset === 'custom') {
+          q = customQuality;
+          maxD = customMaxDim;
+          fmt = customFormat;
+        } else {
+          q = preset.quality;
+          maxD = preset.maxDim;
+          fmt = 'image/jpeg';
+        }
+        // Compress to estimate
+        const compressed = await compressImageDataUrl(currentDataUrl, q, maxD, fmt);
+        const compressedBytes = Math.round(compressed.dataUrl.length * 0.75);
+        const saved = currentBytes > 0 ? Math.round((1 - compressedBytes / currentBytes) * 100) : 0;
+        resultSizeEl.textContent = formatBytes(compressedBytes);
+        resultSavedEl.textContent = saved > 0 ? `Hemat ${saved}%` : 'Tidak ada penghematan';
+        resultSavedEl.style.color = saved > 0 ? 'var(--success)' : 'var(--text-muted)';
+      }
+
+      function debouncedUpdate() {
+        if (previewTimer) clearTimeout(previewTimer);
+        previewTimer = setTimeout(updatePreview, 200);
+      }
+
+      modal.addEventListener('click', async (e) => {
+        const btn = e.target.closest('button');
+        if (btn) {
+          const action = btn.dataset.action;
+          const preset = btn.dataset.preset;
+          if (action === 'cancel') {
+            modal.classList.remove('open');
+            setTimeout(() => { if (modal.parentNode) document.body.removeChild(modal); }, 200);
+            return;
+          }
+          if (action === 'apply') {
+            // Apply compression to bgCanvas
+            const preset = COMPRESS_PRESETS.find(p => p.id === selectedPreset);
+            let q, maxD, fmt;
+            if (selectedPreset === 'custom') {
+              q = customQuality; maxD = customMaxDim; fmt = customFormat;
+            } else {
+              q = preset.quality; maxD = preset.maxDim; fmt = 'image/jpeg';
+            }
+            // Composite draw onto bg first
+            bgCtx.drawImage(drawCanvas, 0, 0);
+            const compressed = await compressImageDataUrl(bgCanvas.toDataURL('image/png'), q, maxD, fmt);
+            // Replace bg with compressed image, clear draw
+            const newImg = new Image();
+            newImg.onload = () => {
+              // Recompute display scale if dimensions changed
+              const newW = newImg.naturalWidth;
+              const newH = newImg.naturalHeight;
+              const wrap = overlay.querySelector('.rf-anno-canvas-wrap');
+              const maxW = window.innerWidth - 20;
+              const maxH = window.innerHeight * 0.55;
+              displayScale = Math.min(maxW / newW, maxH / newH, 1);
+              const dispW = newW * displayScale;
+              const dispH = newH * displayScale;
+              [bgCanvas, drawCanvas, previewCanvas].forEach(c => {
+                c.width = newW;
+                c.height = newH;
+                c.style.width = dispW + 'px';
+                c.style.height = dispH + 'px';
+              });
+              bgCtx.drawImage(newImg, 0, 0);
+              imgWidth = newW;
+              imgHeight = newH;
+              drawCtx.clearRect(0, 0, newW, newH);
+              previewCtx.clearRect(0, 0, newW, newH);
+              undoStack = [];
+              redoStack = [];
+            };
+            newImg.src = compressed.dataUrl;
+            modal.classList.remove('open');
+            setTimeout(() => { if (modal.parentNode) document.body.removeChild(modal); }, 200);
+            return;
+          }
+          if (preset) {
+            selectedPreset = preset;
+            modal.querySelectorAll('.rf-preset-btn').forEach(b => b.classList.toggle('active', b.dataset.preset === preset));
+            customPanel.style.display = preset === 'custom' ? 'block' : 'none';
+            debouncedUpdate();
+            return;
+          }
+        }
+        if (e.target === modal) {
+          modal.classList.remove('open');
+          setTimeout(() => { if (modal.parentNode) document.body.removeChild(modal); }, 200);
+        }
+      });
+
+      // Custom controls
+      qualityInput.addEventListener('input', () => {
+        customQuality = parseInt(qualityInput.value) / 100;
+        modal.querySelector('#rfQualityVal').textContent = qualityInput.value + '%';
+        debouncedUpdate();
+      });
+      maxDimSelect.addEventListener('change', () => {
+        customMaxDim = parseInt(maxDimSelect.value);
+        modal.querySelector('#rfMaxDimVal').textContent = maxDimSelect.value + 'px';
+        debouncedUpdate();
+      });
+      formatSelect.addEventListener('change', () => {
+        customFormat = formatSelect.value;
+        debouncedUpdate();
+      });
+
+      // Initial preview
+      updatePreview();
+    }
 
     function cleanup() {
       document.body.removeChild(overlay);
       document.body.style.overflow = '';
     }
   });
+}
+
+// ===== v1.3.0: Helper — compress image dataUrl =====
+/**
+ * Compress image dataUrl by quality + max dimension.
+ * @param {string} dataUrl - Source image data URL
+ * @param {number} quality - 0..1 (JPEG/WebP quality)
+ * @param {number} maxDim - Max width/height in pixels (preserves aspect ratio)
+ * @param {string} format - 'image/jpeg' | 'image/webp' | 'image/png'
+ * @returns {Promise<{dataUrl: string, width: number, height: number, bytes: number}>}
+ */
+export async function compressImageDataUrl(dataUrl, quality, maxDim, format = 'image/jpeg') {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const origW = img.naturalWidth;
+      const origH = img.naturalHeight;
+      // Compute scaled dimensions (preserve aspect ratio)
+      let outW = origW;
+      let outH = origH;
+      if (Math.max(origW, origH) > maxDim) {
+        const scale = maxDim / Math.max(origW, origH);
+        outW = Math.round(origW * scale);
+        outH = Math.round(origH * scale);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = outW;
+      canvas.height = outH;
+      const ctx = canvas.getContext('2d');
+      // High quality downscale
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      // White background for JPEG (no transparency)
+      if (format === 'image/jpeg') {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, outW, outH);
+      }
+      ctx.drawImage(img, 0, 0, outW, outH);
+      const outDataUrl = canvas.toDataURL(format, quality);
+      const bytes = Math.round(outDataUrl.length * 0.75);
+      resolve({ dataUrl: outDataUrl, width: outW, height: outH, bytes });
+    };
+    img.onerror = () => resolve({ dataUrl, width: 0, height: 0, bytes: 0 });
+    img.src = dataUrl;
+  });
+}
+
+// ===== Helper: format bytes =====
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
 }

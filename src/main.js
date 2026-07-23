@@ -11,7 +11,7 @@ import './styles/views.css';
 import { getSession, onAuthChange } from './auth.js';
 import { pullFromCloud, subscribeRealtime, unsubscribeRealtime, processSyncQueue } from './sync.js';
 import { renderLogin } from './views/login.js';
-import { renderMedia, startCaptureFlow } from './views/media.js';
+import { renderMedia, startCaptureFlow, startDocumentFlow } from './views/media.js';
 import { renderNotes, openNoteEditor } from './views/notes.js';
 import { renderSettings } from './views/settings.js';
 
@@ -176,7 +176,7 @@ function renderShell(user) {
 }
 
 function openFabMenu() {
-  // v1.1.0: FAB unified — 1 tap → bottom sheet dengan 4 opsi (Foto/Galeri/Paste/Catatan)
+  // v1.3.0: FAB unified — 1 tap → bottom sheet dengan 5 opsi (Foto/Galeri/Paste/Dokumen/Catatan)
   // Minim klik: user bisa akses semua dari 1 tombol.
   const sheet = document.createElement('div');
   sheet.className = 'bottom-sheet';
@@ -185,6 +185,10 @@ function openFabMenu() {
     <div class="sheet-content">
       <div class="sheet-handle"></div>
       <h3>Tambah Baru</h3>
+      <button class="sheet-btn sheet-btn-doc" data-action="document">
+        <span class="sheet-ic">📄</span>
+        <div><div class="sheet-t">Scan Dokumen</div><div class="sheet-s">Foto dokumen, auto-rapihin + filter</div></div>
+      </button>
       <button class="sheet-btn sheet-btn-primary" data-action="camera">
         <span class="sheet-ic">📷</span>
         <div><div class="sheet-t">Foto Kamera</div><div class="sheet-s">Buka kamera HP</div></div>
@@ -223,6 +227,9 @@ function openFabMenu() {
     close();
     if (action === 'note') {
       openNoteEditor(null, refreshCurrentView);
+    } else if (action === 'document') {
+      // v1.3.0: Document flow (CamScanner-like)
+      startDocumentFlow('camera', refreshCurrentView);
     } else {
       // Media capture flow
       startCaptureFlow(action, refreshCurrentView);

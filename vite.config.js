@@ -16,7 +16,7 @@ export default defineConfig({
       manifest: {
         name: 'RecallFox PWA',
         short_name: 'RecallFox',
-        description: 'Cross-device media + notes sync untuk RecallFox',
+        description: 'Cross-device media + notes + document scan sync untuk RecallFox',
         theme_color: '#6d3df5',
         background_color: '#ffffff',
         display: 'standalone',

@@ -2,12 +2,14 @@
 // v1.1.0: Render to #appMain (bukan #app) supaya bottom nav + FAB persist.
 // v1.1.0: Capture flow dipindah ke startCaptureFlow() yang dipanggil dari FAB menu.
 // v1.1.0: Tambah "Copy Teks Saja" di batch mode.
+// v1.3.0: Tambah type='document' (CamScanner-like) — list display + viewer + startDocumentFlow
 
-import { deleteVaultItem, getOrDownloadScreenshotBlob, createScreenshotItem } from '../sync.js';
+import { deleteVaultItem, getOrDownloadScreenshotBlob, createScreenshotItem, createDocumentItem } from '../sync.js';
 import { buildScreenshotCaption, buildBatchCaption, writeScreenshotToClipboard } from '../copy-format.js';
 import { dbGetAllVaultItems } from '../db.js';
 import { pickImage, pasteFromClipboard } from '../capture.js';
 import { openAnnotateEditor } from '../annotate.js';
+import { openDocumentEditor } from '../document.js';
 
 let _batchMode = false;
 let _batchSelected = new Set();
@@ -53,10 +55,13 @@ async function refreshList() {
   const grid = document.getElementById('mediaGrid');
   if (!grid) return;
   try {
-    const items = (await dbGetAllVaultItems()).filter(i => i.type === 'screenshot' && !i.archived);
+    // v1.3.0: Tampilkan screenshot DAN document
+    const items = (await dbGetAllVaultItems()).filter(i =>
+      (i.type === 'screenshot' || i.type === 'document') && !i.archived
+    );
     items.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
     if (items.length === 0) {
-      grid.innerHTML = '<div class="empty">📂 Belum ada media.<br><br>Ketuk tombol <strong>+</strong> di bawah untuk tambah foto dari kamera, galeri, atau paste.</div>';
+      grid.innerHTML = '<div class="empty">📂 Belum ada media.<br><br>Ketuk tombol <strong>+</strong> di bawah untuk tambah foto, scan dokumen, atau paste.</div>';
       return;
     }
     grid.innerHTML = items.map(item => {
@@ -64,13 +69,25 @@ async function refreshList() {
       const thumb = item.thumbnail_data_url || '';
       const date = new Date(item.created_at).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' });
       const hasNote = (item.annotation_note || item.source?.annotationNote) ? '<span class="has-note">📝</span>' : '';
+      // v1.3.0: Badge khusus untuk document
+      const isDoc = item.type === 'document';
+      const docBadge = isDoc ? '<div class="type-badge type-doc">📄</div>' : '';
+      const docPagesInfo = isDoc && item.source?.pages?.length > 1
+        ? `${item.source.pages.length} hal · `
+        : (isDoc ? '1 hal · ' : '');
+      const filterBadge = isDoc && item.source?.pages?.[0]?.filter && item.source.pages[0].filter !== 'original'
+        ? `<span class="filter-badge">${escapeHtml(item.source.pages[0].filter)}</span>`
+        : '';
+      const sizeKB = item.screenshot_bytes ? Math.round(item.screenshot_bytes * 0.75 / 1024) + ' KB' : '';
       return `
-        <div class="media-card ${selected ? 'selected' : ''}" data-id="${item.id}">
+        <div class="media-card ${selected ? 'selected' : ''} ${isDoc ? 'media-card-doc' : ''}" data-id="${item.id}">
+          ${docBadge}
           ${_batchMode ? `<div class="check">${selected ? '✓' : ''}</div>` : ''}
           <div class="thumb">${thumb ? `<img src="${thumb}" alt="" loading="lazy">` : '<div class="thumb-ph">🖼️</div>'}</div>
           <div class="meta">
             <div class="title">${escapeHtml(item.title || 'Untitled')}</div>
-            <div class="date">${hasNote}${date}</div>
+            <div class="date">${hasNote}${docPagesInfo}${date}${filterBadge ? ' · ' + filterBadge : ''}</div>
+            ${sizeKB ? `<div class="size">${sizeKB}</div>` : ''}
           </div>
         </div>
       `;
@@ -119,6 +136,11 @@ async function openItemDetail(id) {
   const items = await dbGetAllVaultItems();
   const item = items.find(i => i.id === id);
   if (!item) return;
+  // v1.3.0: Route ke document viewer kalau type='document'
+  if (item.type === 'document') {
+    openDocumentDetail(item);
+    return;
+  }
   showToast('Memuat gambar...');
   const blobRes = await getOrDownloadScreenshotBlob(item);
   const dataUrl = blobRes.dataUrl;
@@ -179,6 +201,91 @@ async function openItemDetail(id) {
   });
 }
 
+// ===== v1.3.0: Document viewer (CamScanner-like) =====
+async function openDocumentDetail(item) {
+  showToast('Memuat dokumen...');
+  const blobRes = await getOrDownloadScreenshotBlob(item);
+  const dataUrl = blobRes.dataUrl;
+  const pages = item.source?.pages || [];
+  const pageCount = pages.length || 1;
+  const note = item.source?.annotationNote || '';
+  const filter = pages[0]?.filter || 'original';
+  const sizeKB = item.screenshot_bytes ? Math.round(item.screenshot_bytes * 0.75 / 1024) + ' KB' : '';
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay modal-doc';
+  modal.innerHTML = `
+    <div class="modal-card modal-card-doc">
+      <div class="modal-header">
+        <h3>📄 ${escapeHtml(item.title || 'Dokumen')}</h3>
+        <button class="icon-btn" data-action="close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="doc-viewer">
+          ${dataUrl
+            ? `<img src="${dataUrl}" class="doc-image" alt="Dokumen">`
+            : '<div class="empty">Gambar tidak tersedia</div>'}
+        </div>
+        <div class="doc-info">
+          ${pageCount > 1 ? `<div class="doc-meta-row"><strong>Halaman:</strong> ${pageCount}</div>` : ''}
+          <div class="doc-meta-row"><strong>Filter:</strong> <span class="filter-badge">${escapeHtml(filter)}</span></div>
+          ${sizeKB ? `<div class="doc-meta-row"><strong>Ukuran:</strong> ${sizeKB}</div>` : ''}
+          <div class="doc-meta-row"><strong>Dibuat:</strong> ${new Date(item.created_at).toLocaleString('id-ID', { dateStyle: 'full', timeStyle: 'short' })}</div>
+          ${note ? `<div class="doc-meta-row"><strong>Catatan:</strong> ${escapeHtml(note)}</div>` : ''}
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" data-action="copy-img">🖼️ Gambar</button>
+        <button class="btn btn-primary" data-action="copy-cap">📋 + Keterangan</button>
+        <button class="btn btn-danger" data-action="delete">🗑️ Hapus</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  setTimeout(() => modal.classList.add('open'), 10);
+
+  const close = () => {
+    modal.classList.remove('open');
+    setTimeout(() => { if (modal.parentNode) document.body.removeChild(modal); }, 200);
+  };
+
+  modal.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) {
+      if (e.target === modal) close();
+      return;
+    }
+    const action = btn.dataset.action;
+    if (action === 'close') { close(); return; }
+    if (action === 'copy-img') {
+      const r = await writeScreenshotToClipboard(dataUrl, '', '');
+      showToast(r.ok ? r.message : 'Gagal: ' + r.error, !r.ok);
+    } else if (action === 'copy-cap') {
+      // Build custom caption for document
+      const dateStr = new Date(item.created_at).toLocaleString('id-ID', { dateStyle: 'full', timeStyle: 'short' });
+      const textPlain = `📄 ${item.title || 'Dokumen'}\n` +
+        `Tipe: Dokumen scan${pageCount > 1 ? ` (${pageCount} halaman)` : ' (1 halaman)'}\n` +
+        `Filter: ${filter}\n` +
+        `Waktu: ${dateStr}\n` +
+        (note ? `Catatan: ${note}\n` : '');
+      const textHtml = `<div><p>📄 <b>${escapeHtml(item.title || 'Dokumen')}</b></p>` +
+        `<p>Tipe: Dokumen scan${pageCount > 1 ? ` (${pageCount} halaman)` : ' (1 halaman)'}</p>` +
+        `<p>Filter: ${escapeHtml(filter)}</p>` +
+        `<p>Waktu: ${dateStr}</p>` +
+        (note ? `<p>Catatan: ${escapeHtml(note)}</p>` : '') +
+        `</div>`;
+      const r = await writeScreenshotToClipboard(dataUrl, textPlain, textHtml);
+      showToast(r.ok ? r.message : 'Gagal: ' + r.error, !r.ok);
+    } else if (action === 'delete') {
+      if (!confirm('Hapus dokumen ini? Tidak bisa di-undo.')) return;
+      await deleteVaultItem(window.__rfUser, item.id);
+      showToast('✓ Dihapus');
+      close();
+      refreshList();
+      if (_onRefresh) _onRefresh();
+    }
+  });
+}
+
 async function doBatchCopy(mode) {
   if (_batchSelected.size === 0) { showToast('Pilih minimal 1 item', true); return; }
   showToast('Menyalin...');
@@ -186,7 +293,9 @@ async function doBatchCopy(mode) {
   const screenshots = [];
   for (const id of _batchSelected) {
     const item = items.find(i => i.id === id);
-    if (!item || item.type !== 'screenshot') continue;
+    if (!item) continue;
+    // v1.3.0: support both screenshot AND document
+    if (item.type !== 'screenshot' && item.type !== 'document') continue;
     let dataUrl = null;
     if (mode !== 'text') {
       const blobRes = await getOrDownloadScreenshotBlob(item);
@@ -194,7 +303,7 @@ async function doBatchCopy(mode) {
     }
     screenshots.push({ item, dataUrl });
   }
-  if (screenshots.length === 0) { showToast('Tidak ada screenshot valid', true); return; }
+  if (screenshots.length === 0) { showToast('Tidak ada item valid', true); return; }
 
   if (mode === 'caption') {
     const cap = buildBatchCaption(screenshots);
@@ -313,6 +422,79 @@ export async function startCaptureFlow(source, onDone) {
   } catch (e) {
     console.error('[RecallFox] save failed:', e);
     showToast('Gagal simpan: ' + e.message, true);
+  }
+}
+
+// ===== v1.3.0: Document flow (CamScanner-like) =====
+// Dipanggil dari FAB menu → option "Scan Dokumen"
+export async function startDocumentFlow(source, onDone) {
+  let picked = null;
+  try {
+    if (source === 'camera' || source === 'gallery') {
+      picked = await pickImage(source);
+    } else if (source === 'paste') {
+      picked = await pasteFromClipboard();
+      if (!picked) { showToast('Clipboard tidak ada gambar', true); return; }
+    }
+  } catch (e) {
+    showToast('Gagal memuat gambar: ' + e.message, true);
+    return;
+  }
+  if (!picked) return;
+
+  // Buka document editor (CamScanner-like)
+  let docRes;
+  try {
+    docRes = await openDocumentEditor(picked.dataUrl, {});
+  } catch (e) {
+    console.error('[RecallFox] document editor failed:', e);
+    showToast('Editor dokumen gagal: ' + e.message, true);
+    return;
+  }
+  if (docRes.cancelled) return;
+
+  const finalDataUrl = docRes.dataUrl;
+  showToast('Menyimpan dokumen...');
+
+  if (!window.__rfUser) {
+    showToast('Sesi habis. Login ulang.', true);
+    return;
+  }
+
+  // Compute final dimensions
+  const finalImg = new Image();
+  await new Promise((r) => {
+    finalImg.onload = r;
+    finalImg.src = finalDataUrl;
+  });
+
+  try {
+    const res = await createDocumentItem(window.__rfUser, {
+      dataUrl: finalDataUrl,
+      width: finalImg.naturalWidth,
+      height: finalImg.naturalHeight,
+      filter: docRes.filter,
+      title: docRes.title,
+      note: docRes.note
+    });
+    console.log('[RecallFox] createDocumentItem result:', res);
+    if (res.ok && res.synced) {
+      showToast('✓ Dokumen tersimpan & tersinkron');
+    } else if (res.ok && res.partial) {
+      showToast('⚠ Dokumen tersimpan — gambar sedang diupload ulang', true);
+    } else if (!res.ok && res.localOnly) {
+      showToast('⚠ Tersimpan lokal — sync cloud gagal, akan retry otomatis', true);
+    } else if (!res.ok) {
+      showToast('Gagal: ' + (res.error || 'unknown'), true);
+    }
+    if (res.ok || res.localOnly) {
+      if (window.__rfNavigate) window.__rfNavigate('media');
+      else refreshList();
+      if (onDone) onDone();
+    }
+  } catch (e) {
+    console.error('[RecallFox] save document failed:', e);
+    showToast('Gagal simpan dokumen: ' + e.message, true);
   }
 }
 
