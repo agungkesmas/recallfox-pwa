@@ -1,4 +1,6 @@
 // src/main.js — Entry point, router, init Supabase + realtime
+// v1.2.0: Realtime WS tidak broadcast (infrastruktur Supabase bermasalah).
+//         Fallback ke polling 10 detik — pasti jalan, tidak bergantung Realtime.
 // v1.1.0: Fix shell render bug — views render to #appMain, bottom nav persists.
 // v1.1.0: FAB unified — 1 button for both media & catatan (minim klik).
 
@@ -15,6 +17,9 @@ import { renderSettings } from './views/settings.js';
 
 let _currentView = 'media';
 let _realtimeBound = false;
+let _pollTimer = null;
+let _lastPullAt = 0;
+const POLL_INTERVAL_MS = 10000; // 10 detik
 
 async function init() {
   const session = await getSession();
@@ -28,6 +33,7 @@ async function init() {
     if (user) {
       await showApp(user);
     } else {
+      stopPolling();
       unsubscribeRealtime();
       _realtimeBound = false;
       showLogin();
@@ -46,6 +52,9 @@ async function init() {
 
 function showLogin() {
   window.__rfUser = null;
+  stopPolling();
+  unsubscribeRealtime();
+  _realtimeBound = false;
   document.getElementById('app').innerHTML = '';
   renderLogin(async (user) => {
     await showApp(user);
@@ -62,18 +71,76 @@ async function showApp(user) {
   pullFromCloud(user).then(() => {
     // Re-render setelah pull supaya data baru muncul
     navigateTo(_currentView);
+    _lastPullAt = Date.now();
   }).catch(e => console.warn('[RecallFox] pull failed:', e.message));
 
   processSyncQueue(user).catch(e => console.warn('[RecallFox] queue failed:', e.message));
 
+  // v1.2.0: Realtime WS tidak broadcast (infrastruktur Supabase bermasalah).
+  // Tetap subscribe sebagai backup (kalau nanti Realtime di-fix di sisi server),
+  // tapi ANDALKAN polling 10 detik untuk sinkronisasi cross-device.
   if (!_realtimeBound) {
     subscribeRealtime(user, () => {
-      // Realtime event → re-render current view
+      // Realtime event (kalau ada) → re-render current view
       if (_currentView === 'media' || _currentView === 'notes') {
         navigateTo(_currentView);
       }
     });
     _realtimeBound = true;
+  }
+
+  // v1.2.0: Polling 10 detik — paling pasti jalan, tidak bergantung Realtime.
+  startPolling(user);
+}
+
+function startPolling(user) {
+  // Clear existing timer
+  if (_pollTimer) clearInterval(_pollTimer);
+
+  _pollTimer = setInterval(async () => {
+    if (!window.__rfUser) {
+      stopPolling();
+      return;
+    }
+    try {
+      // Cek apakah ada perubahan di cloud dengan compare max(updated_at)
+      // Kalau ada → pullFromCloud + re-render
+      const { supabase, VAULT_TABLE, NOTES_TABLE } = await import('./supabase.js');
+      const since = new Date(_lastPullAt - 5000).toISOString(); // 5s buffer
+
+      const [vaultRes, notesRes] = await Promise.all([
+        supabase.from(VAULT_TABLE).select('updated_at')
+          .eq('user_id', user.id).gt('updated_at', since)
+          .order('updated_at', { ascending: false }).limit(1),
+        supabase.from(NOTES_TABLE).select('updated_at')
+          .eq('user_id', user.id).gt('updated_at', since)
+          .order('updated_at', { ascending: false }).limit(1)
+      ]);
+
+      const vaultChanged = vaultRes.data && vaultRes.data.length > 0;
+      const notesChanged = notesRes.data && notesRes.data.length > 0;
+
+      if (vaultChanged || notesChanged) {
+        console.log('[RecallFox] Polling: cloud changed, pulling...', { vaultChanged, notesChanged });
+        await pullFromCloud(user);
+        _lastPullAt = Date.now();
+        if (_currentView === 'media' || _currentView === 'notes') {
+          navigateTo(_currentView);
+        }
+      }
+    } catch (e) {
+      console.warn('[RecallFox] Polling error:', e.message);
+    }
+  }, POLL_INTERVAL_MS);
+
+  console.log(`[RecallFox] Polling started (every ${POLL_INTERVAL_MS / 1000}s)`);
+}
+
+function stopPolling() {
+  if (_pollTimer) {
+    clearInterval(_pollTimer);
+    _pollTimer = null;
+    console.log('[RecallFox] Polling stopped');
   }
 }
 
