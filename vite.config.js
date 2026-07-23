@@ -53,6 +53,16 @@ export default defineConfig({
             }
           },
           {
+            // v1.4.0: Cache OpenCV.js dari jsdelivr CDN (8MB, lazy load saat mode Dokumen)
+            // CacheFirst supaya setelah first load, next time cached (no re-download)
+            urlPattern: /^https:\/\/cdn\.jsdelivr\.net\/npm\/opencv\.js/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'opencv-cache',
+              expiration: { maxEntries: 1, maxAgeSeconds: 60 * 60 * 24 * 365 } // 1 year
+            }
+          },
+          {
             // Cache gambar dari domain lain (jarang dipakai di PWA ini, tapi jaga-jaga)
             urlPattern: /\.(?:png|jpg|jpeg|svg|webp)$/i,
             handler: 'CacheFirst',

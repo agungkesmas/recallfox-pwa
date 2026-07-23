@@ -4,10 +4,10 @@
 // OpenCV.js hanya di-download saat user pertama kali buka mode Dokumen.
 // Setelah loaded, di-cache di browser (cached by service worker).
 //
-// Sumber: https://docs.opencv.org/4.x/opencv.js (official build)
-// Mirror: docs.opencv.org — reliable, CDN-backed
+// Sumber: jsdelivr CDN (https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js)
+// docs.opencv.org return 403 di beberapa region, jsdelivr lebih reliable.
 
-const OPENCV_URL = 'https://docs.opencv.org/4.10.0/opencv.js';
+const OPENCV_URL = 'https://cdn.jsdelivr.net/npm/opencv.js@1.2.1/opencv.js';
 let _loadPromise = null;
 let _loaded = false;
 
