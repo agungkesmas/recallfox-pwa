@@ -146,6 +146,12 @@ async function openItemDetail(id) {
   showToast('Memuat gambar...');
   const blobRes = await getOrDownloadScreenshotBlob(item);
   const dataUrl = blobRes.dataUrl;
+  // v1.6.1: Better error message untuk orphan URL (file tidak ada di cloud)
+  if (!dataUrl && blobRes.error === 'file_not_found_in_cloud') {
+    showToast('⚠ Gambar belum ter-upload ke cloud. Sync sedang retry. Coba lagi nanti atau hapus item ini.', true);
+  } else if (!dataUrl && blobRes.error && blobRes.error !== 'no_cloud_url') {
+    showToast('⚠ Gagal memuat: ' + blobRes.error, true);
+  }
   const cap = buildScreenshotCaption(item, dataUrl);
   const modal = document.createElement('div');
   modal.className = 'modal-overlay';

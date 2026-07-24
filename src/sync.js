@@ -157,7 +157,16 @@ export async function downloadScreenshotBlob(item) {
   try {
     // cache: 'no-store' supaya Service Worker (kalau ada) tidak intercept
     const res = await fetch(cloudUrl, { cache: 'no-store' });
-    if (!res.ok) return { ok: false, error: 'http_' + res.status };
+    if (!res.ok) {
+      // v1.6.1: Better error message untuk 404 (orphan URL).
+      // Supabase Storage return 400 untuk 404 object (quirk). Map ke pesan yang
+      // jelas: file tidak ada di cloud, mungkin upload gagal atau sedang retry.
+      if (res.status === 400 || res.status === 404) {
+        console.warn('[RecallFox] downloadScreenshotBlob: file not found in Storage (orphan URL):', item.id, cloudUrl);
+        return { ok: false, error: 'file_not_found_in_cloud', httpStatus: res.status };
+      }
+      return { ok: false, error: 'http_' + res.status, httpStatus: res.status };
+    }
     const blob = await res.blob();
     if (!blob || blob.size === 0) return { ok: false, error: 'empty_blob' };
     const dataUrl = await new Promise((resolve, reject) => {
@@ -238,12 +247,15 @@ export async function createScreenshotItem(user, payload) {
     screenshot_format: 'png',
     screenshot_bytes: payload.dataUrl?.length || 0,
     thumbnail_data_url: thumbnailDataUrl,
-    // v1.5.3: Selalu simpan path + predictableUrl bahkan kalau upload gagal.
-    // Addon v3.13.4 bisa reconstruct URL dari pattern + coba fetch. Kalau retry
-    // upload berhasil nanti, file akan ada di predictableUrl ini.
-    // Sebelumnya: null kalau upload gagal → addon tidak bisa muat gambar sama sekali.
+    // v1.6.1 FIX BUG v1.5.3: Jangan simpan predictableUrl kalau upload gagal.
+    // Bug v1.5.3: simpan predictableUrl walau upload gagal → URL orphan → fetch 404
+    // → "Gagal memuat gambar: http_400". User frustrasi karena pikir gambar ada.
+    // v1.6.1: Hanya simpan gdrive_file_url kalau upload BENAR-BENAR berhasil.
+    // Kalau upload gagal, simpan null + enqueue retry. Sync queue akan update
+    // gdrive_file_url kalau retry upload berhasil.
+    // gdrive_file_id tetap simpan path (untuk retry upload reference).
     gdrive_file_id: upRes.path || null,
-    gdrive_file_url: upRes.predictableUrl || upRes.url || null,
+    gdrive_file_url: upRes.ok ? (upRes.url || upRes.predictableUrl) : null,
     toppings: [],
     variables: [],
     favorite: false,

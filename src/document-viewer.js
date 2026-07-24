@@ -72,7 +72,11 @@ export async function openDocumentViewer(item, onRefresh) {
     if (!page?.url) return null;
     try {
       const res = await fetch(page.url);
-      if (!res.ok) return null;
+      if (!res.ok) {
+        // v1.6.1: Log orphan URL (file tidak ada di Storage)
+        console.warn('[RecallFox] loadPage: HTTP', res.status, 'for', page.url);
+        return null;
+      }
       const blob = await res.blob();
       const dataUrl = await new Promise((resolve, reject) => {
         const reader = new FileReader();
