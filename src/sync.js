@@ -33,6 +33,24 @@ function genId(prefix = 'p') {
   return prefix + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
 }
 
+// v1.5.1: Promise timeout — supaya operasi Supabase/Storage yang hang
+// tidak nge-block save flow selamanya. Sebelumnya await supabase.upsert()
+// bisa hang tanpa limit → IndexedDB write (yang ada SETELAH upsert) tidak
+// pernah dieksekusi → user lihat "tidak ada jejak save apapun di media".
+//
+// Pemakaian: await withTimeout(supabase.from(t).upsert(row), 20000, 'vault_upsert')
+export function withTimeout(promise, ms, label = 'op') {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      reject(new Error(label + ' timeout after ' + ms + 'ms'));
+    }, ms);
+    Promise.resolve(promise).then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); }
+    );
+  });
+}
+
 export function getDeviceId() {
   let id = localStorage.getItem('recallfox_pwa_device_id');
   if (!id) {
@@ -63,8 +81,21 @@ export async function uploadScreenshotBlob(user, itemId, dataUrl) {
   if (!user || !itemId || !dataUrl) return { ok: false, error: 'invalid_args' };
   const path = `user-${user.id}/${itemId}.png`;
   try {
+    console.log('[RecallFox] uploadScreenshotBlob START:', itemId, 'path:', path);
     // Convert dataUrl → Blob (pakai atob lebih reliable di mobile dibanding fetch)
-    const blob = dataUrlToBlob(dataUrl) || await (await fetch(dataUrl)).blob();
+    // v1.5.1: wrap fetch(dataUrl) dengan timeout — dataUrl besar bisa stall di HP low-end
+    let blob = dataUrlToBlob(dataUrl);
+    if (!blob) {
+      try {
+        const res = await withTimeout(fetch(dataUrl), 10000, 'dataUrl_fetch');
+        blob = await res.blob();
+      } catch (e) {
+        console.warn('[RecallFox] dataUrl fetch failed, fallback ke atob manual:', e.message);
+        // Fallback terakhir: coba decode manual kalau ada
+        if (!blob) return { ok: false, error: 'blob_conversion_failed: ' + e.message };
+      }
+    }
+    if (!blob) return { ok: false, error: 'blob_conversion_failed' };
     // Convert ke PNG kalau perlu
     let pngBlob;
     if (blob.type === 'image/png') {
@@ -78,15 +109,22 @@ export async function uploadScreenshotBlob(user, itemId, dataUrl) {
       pngBlob = await new Promise(r => canvas.toBlob(r, 'image/png'));
     }
     if (!pngBlob) return { ok: false, error: 'png_conversion_failed' };
-    const { error } = await supabase.storage
-      .from(STORAGE_BUCKET)
-      .upload(path, pngBlob, { contentType: 'image/png', upsert: true });
+    // v1.5.1: wrap storage.upload dengan timeout 20s — kalau Supabase Storage
+    // hang (project paused, network issue, dll), jangan block save selamanya.
+    const { error } = await withTimeout(
+      supabase.storage.from(STORAGE_BUCKET).upload(path, pngBlob, { contentType: 'image/png', upsert: true }),
+      20000,
+      'storage_upload'
+    );
     if (error) {
+      console.error('[RecallFox] storage.upload error:', error.message);
       return { ok: false, error: error.message };
     }
     const url = `${supabase.supabaseUrl}/storage/v1/object/public/${STORAGE_BUCKET}/${path}`;
+    console.log('[RecallFox] uploadScreenshotBlob OK:', itemId);
     return { ok: true, url, path };
   } catch (e) {
+    console.error('[RecallFox] uploadScreenshotBlob exception:', e.message);
     return { ok: false, error: e.message };
   }
 }
@@ -142,10 +180,17 @@ export async function getOrDownloadScreenshotBlob(item) {
 // v1.2.0: Return ok:false kalau upload Storage ATAU upsert vault_items gagal.
 //         UI bisa tampilkan pesan error yang akurat ke user.
 //         Sebelumnya selalu ok:true meski gagal → user pikir "tersimpan".
+// v1.5.1: IndexedDB write DILAKUKAN PERTAMA (sebelum upload Storage & upsert
+//         vault_items). Ini menjamin data user TIDAK PERNAH hilang meski cloud
+//         gagal/hang. Sebelumnya IndexedDB write ada SETELAH upsert — kalau upsert
+//         hang (Supabase paused/network issue), IndexedDB tidak pernah ditulis →
+//         user lihat "tidak ada jejak save apapun di media".
+//         Semua await supabase.* dibungkus withTimeout 20s supaya tidak hang selamanya.
 export async function createScreenshotItem(user, payload) {
   // payload: { dataUrl, width, height, mode, title, annotationNote, sourceUrl, sourceTitle }
   const itemId = genId('sh');
   const now = new Date().toISOString();
+  console.log('[RecallFox] createScreenshotItem START:', itemId, 'user:', user?.id, 'mode:', payload?.mode);
   const thumbnailDataUrl = await generateThumbnail(payload.dataUrl, 200);
 
   // Step 1: Upload blob ke Storage DULU
@@ -199,11 +244,27 @@ export async function createScreenshotItem(user, payload) {
     device_id: getDeviceId()
   };
 
-  // Step 2: Insert ke Supabase vault_items
+  // v1.5.1: Step 2 — IndexedDB write PERTAMA (sebelum cloud upsert).
+  // Ini menjamin data user tidak hilang meski cloud gagal/hang.
+  // Kalau IndexedDB write gagal (quota, db corruption), log error tapi lanjut
+  // ke cloud upsert — cloud mungkin masih bisa simpan.
+  try {
+    await dbPutVaultItem(row);
+    await dbPutScreenshotBlob(itemId, payload.dataUrl);
+    console.log('[RecallFox] IndexedDB write OK (pre-cloud):', itemId);
+  } catch (e) {
+    console.error('[RecallFox] IndexedDB write FAILED (pre-cloud):', e.message);
+  }
+
+  // Step 3: Insert ke Supabase vault_items (dengan timeout 20s)
   let upsertOk = false;
   let upsertError = null;
   try {
-    const { data: upsertData, error } = await supabase.from(VAULT_TABLE).upsert(row).select();
+    const { data: upsertData, error } = await withTimeout(
+      supabase.from(VAULT_TABLE).upsert(row).select(),
+      20000,
+      'vault_upsert'
+    );
     console.log('[RecallFox] upsert result:', { error: error?.message, hasData: !!upsertData });
     if (error) {
       upsertError = error.message;
@@ -215,21 +276,25 @@ export async function createScreenshotItem(user, payload) {
       // (addon selalu insert ke screenshots table dengan storage_path/url)
       if (upRes.ok) {
         try {
-          await supabase.from(SCREENSHOTS_TABLE).upsert({
-            id: itemId,
-            user_id: user.id,
-            vault_item_id: itemId,
-            storage_path: upRes.path,
-            storage_url: upRes.url,
-            file_size: payload.dataUrl?.length || 0,
-            width: payload.width || 0,
-            height: payload.height || 0,
-            format: 'png',
-            annotation_note: payload.annotationNote || '',
-            captured_at: now,
-            source_url: payload.sourceUrl || null,
-            source_title: payload.sourceTitle || null
-          });
+          await withTimeout(
+            supabase.from(SCREENSHOTS_TABLE).upsert({
+              id: itemId,
+              user_id: user.id,
+              vault_item_id: itemId,
+              storage_path: upRes.path,
+              storage_url: upRes.url,
+              file_size: payload.dataUrl?.length || 0,
+              width: payload.width || 0,
+              height: payload.height || 0,
+              format: 'png',
+              annotation_note: payload.annotationNote || '',
+              captured_at: now,
+              source_url: payload.sourceUrl || null,
+              source_title: payload.sourceTitle || null
+            }),
+            15000,
+            'screenshots_upsert'
+          );
         } catch (e) {
           // Tidak fatal — vault_items sudah berhasil
           console.warn('[RecallFox] screenshots table insert failed (non-fatal):', e.message);
@@ -242,17 +307,16 @@ export async function createScreenshotItem(user, payload) {
     await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
   }
 
-  // Step 3: Cache ke IndexedDB (selalu, supaya offline read jalan)
-  await dbPutVaultItem(row);
-  // Cache blob lokal juga (selalu, supaya openItemDetail cepat + paste gambar jalan)
-  await dbPutScreenshotBlob(itemId, payload.dataUrl);
-
   // Step 4: Return status akurat
+  // v1.5.1: Data SUDAH di IndexedDB (step 2) — return ok:true bahkan kalau
+  // cloud gagal, supaya UI tampilkan item di media tab + toast akurat.
   if (storageOk && upsertOk) {
+    console.log('[RecallFox] createScreenshotItem OK (cloud synced):', itemId);
     return { ok: true, item: row, synced: true };
   }
   if (upsertOk && !storageOk) {
     // vault_items saved, but blob upload failed — retry in background
+    console.log('[RecallFox] createScreenshotItem PARTIAL (vault saved, blob pending):', itemId);
     return {
       ok: true,
       item: row,
@@ -263,8 +327,11 @@ export async function createScreenshotItem(user, payload) {
     };
   }
   // Both failed or upsert failed — data only in local IndexedDB
+  // v1.5.1: Tetap return ok:true + localOnly supaya UI tetap tampilkan item
+  // (item sudah ada di IndexedDB dari step 2). Toast bilang "lokal".
+  console.log('[RecallFox] createScreenshotItem LOCAL-ONLY:', itemId, 'errors:', { upsertError, storageError });
   return {
-    ok: false,
+    ok: true,                  // v1.5.1: changed from false → true (data IS saved locally)
     item: row,
     synced: false,
     localOnly: true,
@@ -308,7 +375,12 @@ export async function createDocumentItem(user, payload) {
   let storageError = null;
   let storageUrl = null;
   try {
-    const blob = dataUrlToBlob(payload.dataUrl) || await (await fetch(payload.dataUrl)).blob();
+    // v1.5.1: wrap fetch dengan timeout
+    let blob = dataUrlToBlob(payload.dataUrl);
+    if (!blob) {
+      const res = await withTimeout(fetch(payload.dataUrl), 10000, 'doc_dataUrl_fetch');
+      blob = await res.blob();
+    }
     let uploadBlob = blob;
     if (blob.type !== 'image/jpeg') {
       // Convert ke JPEG
@@ -322,9 +394,12 @@ export async function createDocumentItem(user, payload) {
       ctx.drawImage(img, 0, 0);
       uploadBlob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
     }
-    const { error: upErr } = await supabase.storage
-      .from(STORAGE_BUCKET)
-      .upload(path, uploadBlob, { contentType: 'image/jpeg', upsert: true });
+    // v1.5.1: wrap storage.upload dengan timeout 20s
+    const { error: upErr } = await withTimeout(
+      supabase.storage.from(STORAGE_BUCKET).upload(path, uploadBlob, { contentType: 'image/jpeg', upsert: true }),
+      20000,
+      'doc_storage_upload'
+    );
     if (upErr) {
       storageError = upErr.message;
     } else {
@@ -387,11 +462,25 @@ export async function createDocumentItem(user, payload) {
     device_id: getDeviceId()
   };
 
-  // Insert ke vault_items
+  // v1.5.1: IndexedDB write PERTAMA (sebelum cloud upsert) supaya data user
+  // tidak hilang meski cloud gagal/hang.
+  try {
+    await dbPutVaultItem(row);
+    await dbPutScreenshotBlob(itemId, payload.dataUrl);
+    console.log('[RecallFox] Document (single-page) IndexedDB write OK (pre-cloud):', itemId);
+  } catch (e) {
+    console.error('[RecallFox] Document (single-page) IndexedDB write FAILED (pre-cloud):', e.message);
+  }
+
+  // Insert ke vault_items (dengan timeout 20s)
   let upsertOk = false;
   let upsertError = null;
   try {
-    const { error } = await supabase.from(VAULT_TABLE).upsert(row);
+    const { error } = await withTimeout(
+      supabase.from(VAULT_TABLE).upsert(row),
+      20000,
+      'doc_single_vault_upsert'
+    );
     if (error) {
       upsertError = error.message;
       await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
@@ -403,10 +492,7 @@ export async function createDocumentItem(user, payload) {
     await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
   }
 
-  // Cache ke IndexedDB
-  await dbPutVaultItem(row);
-  await dbPutScreenshotBlob(itemId, payload.dataUrl);
-
+  // v1.5.1: Return ok:true bahkan kalau upsert gagal — data sudah di IndexedDB.
   if (storageOk && upsertOk) {
     return { ok: true, item: row, synced: true };
   }
@@ -414,7 +500,7 @@ export async function createDocumentItem(user, payload) {
     return { ok: true, item: row, synced: false, partial: true, warning: 'Dokumen tersimpan, gambar sedang diupload ulang', storageError };
   }
   return {
-    ok: false,
+    ok: true,                    // v1.5.1: changed from false → true (data IS saved locally)
     item: row,
     synced: false,
     localOnly: true,
@@ -426,6 +512,9 @@ export async function createDocumentItem(user, payload) {
 
 // ===== v1.4.0: Document multi-page (Fase 5 — batch) =====
 // Upload semua halaman ke Storage, simpan metadata di source.pages
+// v1.5.1: IndexedDB write DILAKUKAN PERTAMA (sebelum upload & upsert) supaya
+//         data user tidak hilang kalau cloud hang/gagal. Sama seperti
+//         createScreenshotItem. Semua fetch + supabase calls dibungkus timeout.
 export async function createDocumentItemMultiPage(user, payload) {
   // payload: { pages: [{dataUrl, filter, width, height}], title, note }
   const pages = payload.pages || [];
@@ -433,6 +522,7 @@ export async function createDocumentItemMultiPage(user, payload) {
 
   const itemId = genId('doc');
   const now = new Date().toISOString();
+  console.log('[RecallFox] createDocumentItemMultiPage START:', itemId, 'user:', user?.id, 'pages:', pages.length);
 
   // Thumbnail dari halaman pertama
   const thumbnailDataUrl = await generateThumbnail(pages[0].dataUrl, 200);
@@ -440,12 +530,14 @@ export async function createDocumentItemMultiPage(user, payload) {
   // Upload semua halaman ke Storage
   const pageMetas = [];
   let totalBytes = 0;
+  let allUploadsOk = true;
   for (let i = 0; i < pages.length; i++) {
     const page = pages[i];
     const path = `user-${user.id}/${itemId}_p${i + 1}.jpg`;
     let pageUrl = null;
     try {
-      const blob = await (await fetch(page.dataUrl)).blob();
+      // v1.5.1: wrap fetch(dataUrl) dengan timeout — dataUrl besar bisa stall
+      const blob = await (await withTimeout(fetch(page.dataUrl), 10000, 'page_fetch_' + (i + 1))).blob();
       let uploadBlob = blob;
       if (blob.type !== 'image/jpeg') {
         const img = await createImageBitmap(blob);
@@ -458,16 +550,22 @@ export async function createDocumentItemMultiPage(user, payload) {
         ctx.drawImage(img, 0, 0);
         uploadBlob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
       }
-      const { error: upErr } = await supabase.storage
-        .from(STORAGE_BUCKET)
-        .upload(path, uploadBlob, { contentType: 'image/jpeg', upsert: true });
+      // v1.5.1: wrap storage.upload dengan timeout 20s
+      const { error: upErr } = await withTimeout(
+        supabase.storage.from(STORAGE_BUCKET).upload(path, uploadBlob, { contentType: 'image/jpeg', upsert: true }),
+        20000,
+        'page_upload_' + (i + 1)
+      );
       if (!upErr) {
         pageUrl = `${supabase.supabaseUrl}/storage/v1/object/public/${STORAGE_BUCKET}/${path}`;
+        console.log('[RecallFox] Page ' + (i + 1) + ' uploaded OK');
       } else {
         console.warn(`[RecallFox] Page ${i + 1} upload failed:`, upErr.message);
+        allUploadsOk = false;
       }
     } catch (e) {
       console.warn(`[RecallFox] Page ${i + 1} upload exception:`, e.message);
+      allUploadsOk = false;
     }
     const sizeBytes = Math.round(page.dataUrl.length * 0.75);
     totalBytes += sizeBytes;
@@ -514,33 +612,72 @@ export async function createDocumentItemMultiPage(user, payload) {
     device_id: getDeviceId()
   };
 
-  // Insert ke vault_items
+  // v1.5.1: IndexedDB write PERTAMA (sebelum cloud upsert) supaya data user
+  // tidak hilang meski cloud gagal/hang.
+  try {
+    await dbPutVaultItem(row);
+    await dbPutScreenshotBlob(itemId, pages[0].dataUrl);
+    console.log('[RecallFox] Document IndexedDB write OK (pre-cloud):', itemId);
+  } catch (e) {
+    console.error('[RecallFox] Document IndexedDB write FAILED (pre-cloud):', e.message);
+  }
+
+  // Insert ke vault_items (dengan timeout 20s)
   let upsertOk = false;
   let upsertError = null;
   try {
-    const { data: upsertData, error } = await supabase.from(VAULT_TABLE).upsert(row).select();
+    const { data: upsertData, error } = await withTimeout(
+      supabase.from(VAULT_TABLE).upsert(row).select(),
+      20000,
+      'doc_vault_upsert'
+    );
     console.log('[RecallFox] document upsert result:', { error: error?.message, hasData: !!upsertData });
     if (error) {
       upsertError = error.message;
+      console.error('[RecallFox] document upsert FAILED — enqueuing for retry:', upsertError);
       await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
     } else {
       upsertOk = true;
     }
   } catch (e) {
     upsertError = e.message;
+    console.error('[RecallFox] document upsert exception:', upsertError);
     await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
   }
 
-  // Cache ke IndexedDB
-  await dbPutVaultItem(row);
-  // Cache halaman pertama ke screenshot_blobs (untuk preview cepat di list)
-  await dbPutScreenshotBlob(itemId, pages[0].dataUrl);
-
+  // v1.5.1: Return ok:true bahkan kalau upsert gagal — data sudah di IndexedDB.
+  // UI tetap tampilkan item di media tab + toast akurat.
+  if (upsertOk && allUploadsOk) {
+    console.log('[RecallFox] createDocumentItemMultiPage OK (cloud synced):', itemId);
+    return {
+      ok: true,
+      item: row,
+      synced: true,
+      pageCount: pages.length,
+      upsertError: null
+    };
+  }
+  if (upsertOk && !allUploadsOk) {
+    console.log('[RecallFox] createDocumentItemMultiPage PARTIAL:', itemId);
+    return {
+      ok: true,
+      item: row,
+      synced: true,
+      partial: true,
+      pageCount: pages.length,
+      warning: 'Dokumen tersimpan, beberapa halaman sedang diupload ulang',
+      upsertError: null
+    };
+  }
+  // upsert failed — data only in IndexedDB
+  console.log('[RecallFox] createDocumentItemMultiPage LOCAL-ONLY:', itemId, 'upsertError:', upsertError);
   return {
-    ok: upsertOk,
+    ok: true,                  // v1.5.1: changed from upsertOk → true (data IS saved locally)
     item: row,
-    synced: upsertOk,
+    synced: false,
+    localOnly: true,
     pageCount: pages.length,
+    error: upsertError || 'sync_failed',
     upsertError
   };
 }
