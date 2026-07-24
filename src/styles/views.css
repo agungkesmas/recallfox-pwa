@@ -108,7 +108,44 @@
 /* ===== Notes ===== */
 .search-row { margin-bottom: 12px; }
 .search-row input { padding: 12px 14px; font-size: 14px; background: var(--surface); border-radius: 24px; }
+
+/* v1.5.0: Notes toolbar — search (Enter-trigger) + sort + view toggle */
+.notes-toolbar { display: flex; gap: 6px; margin-bottom: 12px; align-items: center; flex-wrap: wrap; }
+.notes-search-wrap { flex: 1; min-width: 160px; position: relative; display: flex; align-items: center; }
+.notes-search-wrap .notes-search {
+  flex: 1; width: 100%; padding: 10px 30px 10px 14px; font-size: 14px;
+  border: 1px solid var(--border); border-radius: 24px; background: var(--surface); color: var(--text);
+}
+.notes-search-wrap .notes-search:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(109,61,245,0.1); }
+/* v1.5.0: Tombol X clear search — muncul hanya saat ada query */
+.notes-search-clear {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  width: 22px; height: 22px; border: none; border-radius: 50%;
+  background: var(--border); color: var(--text-muted); cursor: pointer;
+  font-size: 12px; line-height: 1; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s;
+}
+.notes-search-clear:hover { background: var(--text-muted); color: #fff; }
+.notes-search-clear:active { transform: translateY(-50%) scale(0.92); }
+.notes-toolbar .notes-sort {
+  padding: 10px 12px; font-size: 13px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--text); cursor: pointer; flex-shrink: 0;
+}
+.notes-toolbar .notes-view-toggle {
+  width: 40px; height: 40px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--text); cursor: pointer; font-size: 16px;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background 0.15s;
+}
+.notes-toolbar .notes-view-toggle:hover { background: var(--bg); }
+.notes-toolbar .notes-view-toggle:active { transform: scale(0.95); }
+
 .notes-list { display: flex; flex-direction: column; gap: 8px; }
+/* v1.5.0: Grid mode (2-kolom) — auto-collapse ke 1-kolom di layar sempit */
+.notes-list.notes-grid-mode { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+@media (max-width: 480px) {
+  .notes-list.notes-grid-mode { grid-template-columns: 1fr; }
+}
 .note-card {
   position: relative; padding: 12px 14px; border-radius: var(--radius);
   box-shadow: var(--shadow); border: 1px solid transparent; transition: transform 0.12s;
@@ -126,8 +163,60 @@
 .note-card .pin { position: absolute; top: 6px; right: 8px; font-size: 14px; }
 .note-title { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
 .note-body { font-size: 13px; opacity: 0.85; margin-bottom: 6px; line-height: 1.45; white-space: pre-wrap; }
+/* v1.5.0: Grid mode — clamp body ke 3 baris */
+.notes-grid-mode .note-body {
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden; white-space: normal;
+}
 .note-meta { display: flex; gap: 8px; align-items: center; font-size: 11px; opacity: 0.7; }
 .badge { background: rgba(0,0,0,0.08); padding: 2px 8px; border-radius: 4px; font-weight: 500; }
+
+/* v1.5.0: Rich text editor — contenteditable div pengganti textarea */
+.nbody-edit {
+  min-height: 200px; max-height: 50vh; overflow-y: auto;
+  padding: 12px 14px; font-size: 14px; line-height: 1.6;
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  outline: none; word-break: break-word; overflow-wrap: anywhere;
+  transition: border-color 0.15s;
+}
+.nbody-edit:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(109,61,245,0.1); }
+.nbody-edit:empty::before { content: attr(data-placeholder); color: var(--text-muted); pointer-events: none; }
+/* Dark mode: tag & format dasar di dalam .nbody-edit */
+.nbody-edit table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 13px; }
+.nbody-edit th, .nbody-edit td {
+  border: 1px solid var(--border); padding: 6px 9px; text-align: left; vertical-align: top;
+}
+.nbody-edit th { background: var(--bg); font-weight: 600; }
+.nbody-edit tr:nth-child(even) td { background: rgba(0,0,0,0.02); }
+.nbody-edit b, .nbody-edit strong { font-weight: 700; }
+.nbody-edit i, .nbody-edit em { font-style: italic; }
+.nbody-edit u { text-decoration: underline; }
+.nbody-edit s, .nbody-edit strike { text-decoration: line-through; }
+.nbody-edit ul, .nbody-edit ol { margin: 6px 0 6px 22px; padding: 0; }
+.nbody-edit li { margin: 2px 0; }
+.nbody-edit h1 { font-size: 20px; font-weight: 700; margin: 12px 0 6px; }
+.nbody-edit h2 { font-size: 18px; font-weight: 700; margin: 10px 0 6px; }
+.nbody-edit h3 { font-size: 16px; font-weight: 700; margin: 8px 0 4px; }
+.nbody-edit h4, .nbody-edit h5, .nbody-edit h6 { font-size: 14px; font-weight: 700; margin: 6px 0 4px; }
+.nbody-edit blockquote {
+  border-left: 3px solid var(--primary); padding: 4px 12px; margin: 8px 0;
+  color: var(--text-muted); background: var(--bg); border-radius: 0 4px 4px 0;
+}
+.nbody-edit code {
+  background: var(--bg); padding: 2px 6px; border-radius: 3px;
+  font-family: 'SFMono-Regular', Menlo, monospace; font-size: 13px;
+}
+.nbody-edit pre {
+  background: var(--bg); padding: 10px 12px; border-radius: 6px;
+  overflow-x: auto; margin: 8px 0; font-size: 13px; line-height: 1.5;
+}
+.nbody-edit pre code { background: none; padding: 0; }
+.nbody-edit hr { border: none; border-top: 1px solid var(--border); margin: 12px 0; }
+.nbody-edit a { color: var(--primary); text-decoration: underline; cursor: pointer; }
+.nbody-edit img { max-width: 100%; height: auto; border-radius: 4px; margin: 4px 0; }
+.nbody-edit mark { background: #fef3c7; color: #92400e; padding: 1px 3px; border-radius: 2px; }
+.nbody-edit sub, .nbody-edit sup { font-size: 11px; }
 
 /* ===== Settings ===== */
 .settings-card {
