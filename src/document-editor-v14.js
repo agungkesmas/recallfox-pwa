@@ -783,40 +783,20 @@ async function applyEnhance(ctx, w, h) {
   }
   ctx.putImageData(imageData, 0, 0);
 
-  // ===== Step 2: CLAHE di L channel (luminance Y) =====
-  // Approximation L = 0.299R + 0.587G + 0.114B (BT.601)
-  // CLAHE = Contrast Limited Adaptive Histogram Equalization — tile-based, clip limit
-  const afterBgData = ctx.getImageData(0, 0, w, h);
-  const ad = afterBgData.data;
-  // Compute luminance
-  const lum = new Uint8ClampedArray(w * h);
-  for (let i = 0, j = 0; i < ad.length; i += 4, j++) {
-    lum[j] = (0.299 * ad[i] + 0.587 * ad[i + 1] + 0.114 * ad[i + 2]) | 0;
-  }
-  // Apply CLAHE
-  const tile_size = Math.max(32, Math.floor(Math.max(w, h) / 8));
-  const clip_limit = 1.5;
-  const lumClahe = claheApprox(lum, w, h, tile_size, clip_limit);
-  // Apply CLAHE result ke original RGB: scale each channel by ratio (newL / oldL)
-  for (let i = 0, j = 0; i < ad.length; i += 4, j++) {
-    const oldL = lum[j];
-    const newL = lumClahe[j];
-    if (oldL > 5) {
-      const ratio = newL / oldL;
-      ad[i]     = Math.min(255, Math.max(0, ad[i]     * ratio));
-      ad[i + 1] = Math.min(255, Math.max(0, ad[i + 1] * ratio));
-      ad[i + 2] = Math.min(255, Math.max(0, ad[i + 2] * ratio));
-    } else {
-      // Very dark pixel — set langsung ke newL (grayscale fallback)
-      ad[i] = newL; ad[i + 1] = newL; ad[i + 2] = newL;
-    }
-  }
-  ctx.putImageData(afterBgData, 0, 0);
+  // v1.6.3: CLAHE DIHAPUS — terlalu agresif, bikin teks burem.
+  // CLAHE (Contrast Limited Adaptive Histogram Equalization) amplifikasi kontras
+  // lokal per tile (250px untuk gambar 2000px). Untuk dokumen dengan teks
+  // kecil/banyak: histogram equalization di tile kecil bikin thin strokes
+  // "melebar" → blur. Background noise (kertas) ikut ter-amplifikasi.
+  // clip_limit=1.5 terlalu rendah (standar CLAHE 2-4) → redistribution agresif.
+  //
+  // Sekarang enhance = bg norm + saturation + sharpen only (v1.4.2 approach).
+  // Teks tetap tajam, background bersih, warna teks preserve.
 
-  // ===== Step 3: Light saturation boost 1.08 =====
+  // ===== Step 2: Light saturation boost 1.08 =====
   // Pakai approach yang lebih efisien: avg + (channel - avg) * 1.08
-  const afterClaheData = ctx.getImageData(0, 0, w, h);
-  const cd = afterClaheData.data;
+  const afterBgData = ctx.getImageData(0, 0, w, h);
+  const cd = afterBgData.data;
   for (let i = 0; i < cd.length; i += 4) {
     const r = cd[i], g = cd[i + 1], b = cd[i + 2];
     const avg = (r + g + b) / 3;
@@ -824,9 +804,9 @@ async function applyEnhance(ctx, w, h) {
     cd[i + 1] = Math.max(0, Math.min(255, avg + (g - avg) * 1.08));
     cd[i + 2] = Math.max(0, Math.min(255, avg + (b - avg) * 1.08));
   }
-  ctx.putImageData(afterClaheData, 0, 0);
+  ctx.putImageData(afterBgData, 0, 0);
 
-  // ===== Step 4: Light sharpen 0.5 (unsharp mask) =====
+  // ===== Step 3: Light sharpen 0.5 (unsharp mask) =====
   const blurredCanvas = document.createElement('canvas');
   blurredCanvas.width = w;
   blurredCanvas.height = h;

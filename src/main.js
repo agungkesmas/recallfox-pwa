@@ -108,6 +108,12 @@ function startPolling(user) {
       stopPolling();
       return;
     }
+    // v1.6.3: Skip polling kalau offline — supaya tidak spam error di console
+    // dan tidak boros battery (request gagal terus).
+    if (!navigator.onLine) {
+      console.log('[RecallFox] Polling: offline, skip');
+      return;
+    }
     try {
       // Cek apakah ada perubahan di cloud dengan compare max(updated_at)
       // Kalau ada → pullFromCloud + re-render
@@ -161,6 +167,10 @@ function startRetryQueue(user) {
   _retryTimer = setInterval(async () => {
     if (!window.__rfUser) {
       stopRetryQueue();
+      return;
+    }
+    // v1.6.3: Skip retry queue kalau offline — supaya tidak spam error
+    if (!navigator.onLine) {
       return;
     }
     try {

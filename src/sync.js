@@ -60,6 +60,82 @@ export function getDeviceId() {
   return id;
 }
 
+// v1.6.3: withAuthRetry — wrap Supabase calls supaya kalau 401 (session expired),
+// coba refresh session sekali lalu retry. Sebelumnya: 401 silent fail → data tidak
+// sync tanpa user tahu. Sekarang: refresh + retry, kalau masih gagal → sign out.
+export async function withAuthRetry(supabaseCall) {
+  try {
+    const result = await supabaseCall;
+    // Check for 401 in error
+    if (result.error && (result.error.code === 'PGRST301' || result.error.message?.includes('JWT') || result.error.message?.includes('401'))) {
+      console.warn('[RecallFox] 401 detected, refreshing session...');
+      const { supabase } = await import('./supabase.js');
+      const { data: refreshData, error: refreshErr } = await supabase.auth.refreshSession();
+      if (refreshErr || !refreshData.session) {
+        console.error('[RecallFox] Session refresh failed, signing out:', refreshErr?.message);
+        await supabase.auth.signOut();
+        return result; // return original error
+      }
+      console.log('[RecallFox] Session refreshed, retrying call...');
+      // Retry the call with refreshed session — re-execute the factory
+      if (typeof supabaseCall === 'function') {
+        return await supabaseCall();
+      }
+      // If it was a promise (not a factory), we can't retry — return original
+      return result;
+    }
+    return result;
+  } catch (e) {
+    if (e.message?.includes('401') || e.message?.includes('JWT')) {
+      console.warn('[RecallFox] 401 exception, refreshing session...');
+      try {
+        const { supabase } = await import('./supabase.js');
+        const { error: refreshErr } = await supabase.auth.refreshSession();
+        if (refreshErr) {
+          await supabase.auth.signOut();
+        }
+      } catch (re) { /* ignore */ }
+    }
+    throw e;
+  }
+}
+
+// v1.6.3: Cleanup sync queue — max 100 entries, max age 7 hari.
+// Sebelumnya: queue grow forever kalau upload terus gagal → IndexedDB quota penuh.
+export async function cleanupSyncQueue() {
+  try {
+    const queue = await dbGetSyncQueue();
+    if (queue.length === 0) return;
+    const MAX_ENTRIES = 100;
+    const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 hari
+    const now = Date.now();
+    const toDelete = [];
+    // Hapus entry >7 hari
+    for (const entry of queue) {
+      const entryTime = new Date(entry.created_at || entry.id || 0).getTime();
+      if (now - entryTime > MAX_AGE_MS) {
+        toDelete.push(entry.id);
+      }
+    }
+    // Kalau masih >100 entry, hapus yang tertua
+    if (queue.length - toDelete.length > MAX_ENTRIES) {
+      const sorted = queue
+        .filter(e => !toDelete.includes(e.id))
+        .sort((a, b) => new Date(a.created_at || a.id || 0) - new Date(b.created_at || b.id || 0));
+      const excess = sorted.slice(0, sorted.length - MAX_ENTRIES);
+      for (const e of excess) toDelete.push(e.id);
+    }
+    for (const id of toDelete) {
+      try { await dbDeleteSyncQueueItem(id); } catch (e) { /* ignore */ }
+    }
+    if (toDelete.length > 0) {
+      console.warn('[RecallFox] Sync queue cleanup: removed', toDelete.length, 'old entries');
+    }
+  } catch (e) {
+    console.warn('[RecallFox] Sync queue cleanup failed:', e.message);
+  }
+}
+
 async function generateThumbnail(dataUrl, maxSize = 200) {
   return new Promise((resolve) => {
     const img = new Image();
@@ -1035,6 +1111,8 @@ export function unsubscribeRealtime() {
 // ===== Process sync queue (retry failed uploads) =====
 export async function processSyncQueue(user) {
   if (!user) return;
+  // v1.6.3: Cleanup queue sebelum proses — hapus entry >7 hari / >100 entries
+  await cleanupSyncQueue();
   const queue = await dbGetSyncQueue();
   for (const entry of queue) {
     try {

@@ -9,6 +9,10 @@
 
 import { writeScreenshotToClipboard, buildScreenshotCaption, escapeHtml } from './copy-format.js';
 import { deleteVaultItem } from './sync.js';
+// v1.6.3: Import db helpers untuk cache page dataUrls ke IndexedDB.
+// Sebelumnya: pageDataUrls hanya di memory (array) → setelah modal tutup,
+// cache hilang → buka document yang sama 2x = download 2x (boros bandwidth).
+import { dbGetScreenshotBlob, dbPutScreenshotBlob } from './db.js';
 
 /**
  * Open multi-page document viewer.
@@ -66,10 +70,22 @@ export async function openDocumentViewer(item, onRefresh) {
   const pageIndicator = modal.querySelector('#docPageIndicator');
 
   // Download page image (lazy + cache)
+  // v1.6.3: Cache ke IndexedDB dengan key <itemId>_p<pageNum> supaya next buka
+  // tidak perlu download lagi. Sebelumnya hanya cache di memory (array).
   async function loadPage(idx) {
     if (pageDataUrls[idx]) return pageDataUrls[idx];
     const page = pages[idx];
     if (!page?.url) return null;
+    const cacheKey = item.id + '_p' + (idx + 1);
+    // v1.6.3: Cek IndexedDB cache dulu
+    try {
+      const cached = await dbGetScreenshotBlob(cacheKey);
+      if (cached) {
+        console.log('[RecallFox] loadPage: cache hit (IndexedDB):', cacheKey);
+        pageDataUrls[idx] = cached;
+        return cached;
+      }
+    } catch (e) { /* ignore — fall through to fetch */ }
     try {
       const res = await fetch(page.url);
       if (!res.ok) {
@@ -85,6 +101,8 @@ export async function openDocumentViewer(item, onRefresh) {
         reader.readAsDataURL(blob);
       });
       pageDataUrls[idx] = dataUrl;
+      // v1.6.3: Simpan ke IndexedDB cache (fire-and-forget)
+      try { await dbPutScreenshotBlob(cacheKey, dataUrl); } catch (e) { /* ignore */ }
       return dataUrl;
     } catch (e) {
       console.error('[RecallFox] loadPage failed:', e.message);
@@ -182,10 +200,36 @@ export async function openDocumentViewer(item, onRefresh) {
       const r = await writeScreenshotToClipboard(allDataUrl, cap.textPlain, cap.textHtml);
       showToast(r.ok ? `✓ ${validUrls.length} halaman tersalin` : 'Gagal: ' + r.error, !r.ok);
     } else if (action === 'copy-cap') {
-      const dataUrl = pageDataUrls[currentPage];
-      const cap = buildDocCaption(item, totalPages, currentPage + 1);
-      const r = await writeScreenshotToClipboard(dataUrl, cap.textPlain, cap.textHtml);
-      showToast(r.ok ? '✓ Keterangan tersalin' : 'Gagal: ' + r.error, !r.ok);
+      // v1.6.3: Composite SEMUA halaman (bukan cuma current) + keterangan.
+      // Sebelumnya: hanya pageDataUrls[currentPage] — user expect "📋 + Keterangan"
+      // = semua halaman + keterangan, bukan hanya halaman saat ini.
+      showToast('📋 Menyiapkan semua halaman + keterangan...');
+      const dataUrls = await Promise.all(pages.map((_, i) => loadPage(i)));
+      const validUrls = dataUrls.filter(Boolean);
+      if (validUrls.length === 0) { showToast('Tidak ada halaman termuat', true); return; }
+      let compositeDataUrl;
+      if (validUrls.length === 1) {
+        compositeDataUrl = validUrls[0];
+      } else {
+        const imgs = await Promise.all(validUrls.map(loadImage));
+        const totalH = imgs.reduce((sum, img) => sum + img.naturalHeight, 0);
+        const maxW = Math.max(...imgs.map(img => img.naturalWidth));
+        const canvas = document.createElement('canvas');
+        canvas.width = maxW;
+        canvas.height = totalH;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, maxW, totalH);
+        let y = 0;
+        for (const img of imgs) {
+          ctx.drawImage(img, 0, y);
+          y += img.naturalHeight;
+        }
+        compositeDataUrl = canvas.toDataURL('image/png');
+      }
+      const cap = buildDocCaption(item, validUrls.length);
+      const r = await writeScreenshotToClipboard(compositeDataUrl, cap.textPlain, cap.textHtml);
+      showToast(r.ok ? `✓ ${validUrls.length} halaman + keterangan tersalin` : 'Gagal: ' + r.error, !r.ok);
     } else if (action === 'delete') {
       if (!confirm(`Hapus dokumen "${item.title}" (${totalPages} halaman)? Tidak bisa di-undo.`)) return;
       await deleteVaultItem(window.__rfUser, item.id);
