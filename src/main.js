@@ -18,8 +18,10 @@ import { renderSettings } from './views/settings.js';
 let _currentView = 'media';
 let _realtimeBound = false;
 let _pollTimer = null;
+let _retryTimer = null;
 let _lastPullAt = 0;
 const POLL_INTERVAL_MS = 10000; // 10 detik
+const RETRY_INTERVAL_MS = 30000; // 30 detik — retry sync queue yang gagal
 
 async function init() {
   const session = await getSession();
@@ -34,6 +36,7 @@ async function init() {
       await showApp(user);
     } else {
       stopPolling();
+      stopRetryQueue();
       unsubscribeRealtime();
       _realtimeBound = false;
       showLogin();
@@ -53,6 +56,7 @@ async function init() {
 function showLogin() {
   window.__rfUser = null;
   stopPolling();
+  stopRetryQueue();
   unsubscribeRealtime();
   _realtimeBound = false;
   document.getElementById('app').innerHTML = '';
@@ -91,6 +95,8 @@ async function showApp(user) {
 
   // v1.2.0: Polling 10 detik — paling pasti jalan, tidak bergantung Realtime.
   startPolling(user);
+  // v1.6.0: Auto-retry sync queue 30 detik — anti-gagal save.
+  startRetryQueue(user);
 }
 
 function startPolling(user) {
@@ -141,6 +147,36 @@ function stopPolling() {
     clearInterval(_pollTimer);
     _pollTimer = null;
     console.log('[RecallFox] Polling stopped');
+  }
+}
+
+// v1.6.0: Auto-retry sync queue setiap 30 detik — anti-gagal save.
+// Sebelumnya: queue hanya diproses saat init atau saat event 'online'.
+//   → kalau cloud timeout saat save, user lihat "Tersimpan lokal — retry otomatis"
+//   tapi retry tidak pernah terjadi sampai user refresh page.
+// Sekarang: setInterval 30s proses queue terus-menerus. Kalau ada item di queue
+//   (upload screenshot/doc/note yang gagal), akan di-retry otomatis.
+function startRetryQueue(user) {
+  if (_retryTimer) clearInterval(_retryTimer);
+  _retryTimer = setInterval(async () => {
+    if (!window.__rfUser) {
+      stopRetryQueue();
+      return;
+    }
+    try {
+      await processSyncQueue(user);
+    } catch (e) {
+      // Silent fail — tidak perlu console.warn (queue akan retry lagi 30s lagi)
+    }
+  }, RETRY_INTERVAL_MS);
+  console.log(`[RecallFox] Retry queue started (every ${RETRY_INTERVAL_MS / 1000}s)`);
+}
+
+function stopRetryQueue() {
+  if (_retryTimer) {
+    clearInterval(_retryTimer);
+    _retryTimer = null;
+    console.log('[RecallFox] Retry queue stopped');
   }
 }
 

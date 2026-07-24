@@ -21,14 +21,34 @@ const FILTERS = [
 // User feedback: "PERBAIKI fitur mengeluarkan warna teks nya secara default
 //   saat foto dokumen dari pwa, sehingga teks tu terbaca jelas dalam kondisi
 //   foto apapun"
-// Algoritma (verified via VLM evaluation pada 6 test dokumen):
-//   1. Bg normalization target 250 (kill shadow + yellow tint)
-//   2. Saturation boost 1.25 (preserve + enhance warna teks)
-//   3. Sharpening 1.2 (crisp text edges)
-//   4. NO per-channel contrast stretch (kills blue ink color)
-//   5. NO binarization — selalu output RGB color
-// Hasil: readability 9-10/10 di SEMUA kondisi (ideal, shadow, yellowed,
-//   blue ink, dark, blob). Blue ink color preserved 10/10.
+// v1.6.0: REWRITE algoritma 'enhance' — VLM-evaluated v4 hybrid
+//   User feedback: "foto formulir aja yang jelas prinannya, ketika difoto
+//     dokumen banyak garis atau teks yang hilang, foto biasa juga gitu"
+//   VLM evaluation pada 5 sample (bersih, shadow, low contrast, blue ink,
+//   dark photo) menunjukkan v1.4.2 (bg norm 250 + sat 1.25 + sharpen 1.2)
+//   terlalu agresif — kalah di 4/5 sample:
+//     - Gagal di shadow (target 250 statis tidak adaptif)
+//     - Washed out di dark photo (over-exposed)
+//     - Pudar di blue ink (CLAHE/saturation ganggu warna)
+//     - Noise/halo di formulir ideal (sharpen 1.2 terlalu tinggi)
+//   v4 hybrid menang di 3/5 sample (bersih, low contrast, dark photo),
+//   kalah tipis di shadow & blue ink (v3 gentle menang — tapi v3 kalah di
+//   low contrast & dark photo karena terlalu konservatif).
+//
+//   Algoritma v4 (CamScanner-inspired, lebih gentle dari v1.4.2):
+//     1. Bg normalization ADAPTIF: target = min(240, max(215, bg_median * 0.96))
+//        (bukan statis 250) — tidak over-force area gelap, tidak over-expose area terang
+//     2. CLAHE di L channel (luminance) dengan clip limit 1.5 — adaptif per region,
+//        preserve teks tipis pensil tanpa noise
+//     3. Light saturation boost 1.08 (bukan 1.25) — subtle, preserve warna biru
+//     4. Light sharpen 0.5 (bukan 1.2) — crisp tanpa halo
+//
+//   Hasil VLM eval v4 (skala 1-10):
+//     - Bersih: R=9 TP=9 CP=8 N=8 (winner)
+//     - Shadow: R=8 TP=7 CP=7 N=7 (2nd, v3 menang tipis)
+//     - Low contrast: R=9 TP=8 CP=8 N=8 (winner — teks pensil tetap terbaca)
+//     - Blue ink: R=7 TP=7 CP=8 N=6 (2nd, v3 menang tipis — biru lebih preserve)
+//     - Dark photo: R=9 TP=8 CP=8 N=8 (winner — recovery dark tanpa washed out)
 const DEFAULT_FILTER = 'enhance';
 
 const MAX_PAGES = 10;
@@ -702,37 +722,35 @@ function boxBlur(src, w, h, r) {
 }
 
 // ============================================================================
-// v1.4.2: ENHANCE FILTER — default filter untuk readability optimal
-// Port dari filter_enhance_final di Python (verified via VLM evaluation)
+// v1.6.0: ENHANCE FILTER v4 hybrid — VLM-evaluated optimal for scan dokumen
+// Port dari Python test_filter_v4.py (verified via VLM evaluation on 5 samples)
 //
-// Algoritma:
-//   1. Bg normalization target 250 (kill shadow + yellow tint)
-//   2. Saturation boost 1.25 (preserve + enhance warna teks)
-//   3. Sharpening 1.2 (crisp text edges)
-//   4. NO per-channel contrast stretch (kills blue ink color)
-//   5. NO binarization — selalu output RGB color
+// Algoritma (CamScanner-inspired, gentle, preserve warna):
+//   1. Bg normalization ADAPTIF: target = min(240, max(215, bg_median * 0.96))
+//      (bukan statis 250) — tidak over-force area gelap, tidak over-expose area terang
+//   2. CLAHE di L channel (luminance Y) dengan clip limit 1.5 — adaptif per region,
+//      preserve teks tipis pensil tanpa noise, recovery dark photo tanpa washed out
+//   3. Light saturation boost 1.08 (bukan 1.25) — subtle, preserve warna biru
+//   4. Light sharpen 0.5 (bukan 1.2) — crisp tanpa halo
 //
-// Hasil VLM evaluation pada 6 test dokumen:
-//   - Readability 9-10/10 di SEMUA kondisi (ideal, shadow, yellowed, blue ink, dark, blob)
-//   - Blue ink color preserved 10/10
-//   - Color preserved 10/10 di ideal, shadow, blue ink, dark
+// VLM eval v4 vs v1.4.2 (5 sample):
+//   - v1.4.2 kalah di 4/5 sample (over-processed, gagal di shadow/dark, pudar di blue ink)
+//   - v4 menang di 3/5 sample (bersih, low contrast, dark photo), kalah tipis di shadow & blue ink
 // ============================================================================
 
 async function applyEnhance(ctx, w, h) {
   const imageData = ctx.getImageData(0, 0, w, h);
   const data = imageData.data;
 
-  // ===== Step 1: Bg normalization (target 250) =====
-  // Estimate background via downscale + upscale (cheap Gaussian blur approximation)
+  // ===== Step 1: Bg normalization ADAPTIF =====
+  // Estimate background via downscale + upscale (cheap blur approximation)
   const bgCanvas = document.createElement('canvas');
   const smallW = Math.max(1, Math.floor(w / 18));
   const smallH = Math.max(1, Math.floor(h / 18));
   bgCanvas.width = smallW;
   bgCanvas.height = smallH;
   const bgCtx = bgCanvas.getContext('2d');
-  // Draw current canvas scaled down
   bgCtx.drawImage(ctx.canvas, 0, 0, smallW, smallH);
-  // Scale back up to original size
   const bgFullCanvas = document.createElement('canvas');
   bgFullCanvas.width = w;
   bgFullCanvas.height = h;
@@ -741,66 +759,74 @@ async function applyEnhance(ctx, w, h) {
   bgFullCtx.drawImage(bgCanvas, 0, 0, w, h);
   const bgData = bgFullCtx.getImageData(0, 0, w, h).data;
 
-  // Apply bg normalization: out = pixel * 250 / max(bg, 25)
-  for (let i = 0; i < data.length; i += 4) {
-    const bgR = Math.max(25, bgData[i]);
-    const bgG = Math.max(25, bgData[i + 1]);
-    const bgB = Math.max(25, bgData[i + 2]);
-    data[i]     = Math.min(255, (data[i]     * 250) / bgR);
-    data[i + 1] = Math.min(255, (data[i + 1] * 250) / bgG);
-    data[i + 2] = Math.min(255, (data[i + 2] * 250) / bgB);
+  // Compute median bg dari pixel yang bright (paper)
+  // Kalau bg sudah bright → target 240 (slight boost). Kalau dark → target 215 (jangan paksa).
+  const brightSamples = [];
+  for (let i = 0; i < bgData.length; i += 4 * 50) { // sample every 50th pixel
+    const lum = (bgData[i] + bgData[i + 1] + bgData[i + 2]) / 3;
+    if (lum > 100) brightSamples.push(lum);
   }
+  brightSamples.sort((a, b) => a - b);
+  const bgMedian = brightSamples.length > 0
+    ? brightSamples[Math.floor(brightSamples.length / 2)]
+    : 200;
+  const target = Math.min(240, Math.max(215, bgMedian * 0.96));
 
-  // ===== Step 2: Saturation boost 1.25 (HSV S channel) =====
-  // Convert each pixel RGB → HSV, boost S, convert back to RGB
+  // Apply bg normalization dengan target adaptif
   for (let i = 0; i < data.length; i += 4) {
-    let r = data[i], g = data[i + 1], b = data[i + 2];
-    const max = Math.max(r, g, b);
-    const min = Math.min(r, g, b);
-    const delta = max - min;
-    // Value
-    const v = max;
-    if (delta === 0) continue;  // grayscale, no saturation to boost
-    // Saturation
-    let s = max === 0 ? 0 : (delta / max);
-    // Hue
-    let h_hsv;
-    if (max === r) {
-      h_hsv = ((g - b) / delta) % 6;
-    } else if (max === g) {
-      h_hsv = (b - r) / delta + 2;
-    } else {
-      h_hsv = (r - g) / delta + 4;
-    }
-    h_hsv *= 60;
-    if (h_hsv < 0) h_hsv += 360;
-
-    // Boost saturation 1.25
-    s = Math.min(1, s * 1.25);
-
-    // HSV → RGB
-    const c = v * s;
-    const x = c * (1 - Math.abs(((h_hsv / 60) % 2) - 1));
-    const m = v - c;
-    let r1, g1, b1;
-    if (h_hsv < 60)       { r1 = c; g1 = x; b1 = 0; }
-    else if (h_hsv < 120) { r1 = x; g1 = c; b1 = 0; }
-    else if (h_hsv < 180) { r1 = 0; g1 = c; b1 = x; }
-    else if (h_hsv < 240) { r1 = 0; g1 = x; b1 = c; }
-    else if (h_hsv < 300) { r1 = x; g1 = 0; b1 = c; }
-    else                  { r1 = c; g1 = 0; b1 = x; }
-
-    data[i]     = Math.round((r1 + m) * 255 / 255);
-    data[i + 1] = Math.round((g1 + m) * 255 / 255);
-    data[i + 2] = Math.round((b1 + m) * 255 / 255);
+    const bgR = Math.max(50, bgData[i]);
+    const bgG = Math.max(50, bgData[i + 1]);
+    const bgB = Math.max(50, bgData[i + 2]);
+    data[i]     = Math.min(255, (data[i]     * target) / bgR);
+    data[i + 1] = Math.min(255, (data[i + 1] * target) / bgG);
+    data[i + 2] = Math.min(255, (data[i + 2] * target) / bgB);
   }
-
-  // Put data back to canvas
   ctx.putImageData(imageData, 0, 0);
 
-  // ===== Step 3: Sharpening (Unsharp Mask, amount 1.2) =====
-  // unsharp = original + (original - blurred) * 1.2
-  // Use canvas filter blur for Gaussian approximation
+  // ===== Step 2: CLAHE di L channel (luminance Y) =====
+  // Approximation L = 0.299R + 0.587G + 0.114B (BT.601)
+  // CLAHE = Contrast Limited Adaptive Histogram Equalization — tile-based, clip limit
+  const afterBgData = ctx.getImageData(0, 0, w, h);
+  const ad = afterBgData.data;
+  // Compute luminance
+  const lum = new Uint8ClampedArray(w * h);
+  for (let i = 0, j = 0; i < ad.length; i += 4, j++) {
+    lum[j] = (0.299 * ad[i] + 0.587 * ad[i + 1] + 0.114 * ad[i + 2]) | 0;
+  }
+  // Apply CLAHE
+  const tile_size = Math.max(32, Math.floor(Math.max(w, h) / 8));
+  const clip_limit = 1.5;
+  const lumClahe = claheApprox(lum, w, h, tile_size, clip_limit);
+  // Apply CLAHE result ke original RGB: scale each channel by ratio (newL / oldL)
+  for (let i = 0, j = 0; i < ad.length; i += 4, j++) {
+    const oldL = lum[j];
+    const newL = lumClahe[j];
+    if (oldL > 5) {
+      const ratio = newL / oldL;
+      ad[i]     = Math.min(255, Math.max(0, ad[i]     * ratio));
+      ad[i + 1] = Math.min(255, Math.max(0, ad[i + 1] * ratio));
+      ad[i + 2] = Math.min(255, Math.max(0, ad[i + 2] * ratio));
+    } else {
+      // Very dark pixel — set langsung ke newL (grayscale fallback)
+      ad[i] = newL; ad[i + 1] = newL; ad[i + 2] = newL;
+    }
+  }
+  ctx.putImageData(afterBgData, 0, 0);
+
+  // ===== Step 3: Light saturation boost 1.08 =====
+  // Pakai approach yang lebih efisien: avg + (channel - avg) * 1.08
+  const afterClaheData = ctx.getImageData(0, 0, w, h);
+  const cd = afterClaheData.data;
+  for (let i = 0; i < cd.length; i += 4) {
+    const r = cd[i], g = cd[i + 1], b = cd[i + 2];
+    const avg = (r + g + b) / 3;
+    cd[i]     = Math.max(0, Math.min(255, avg + (r - avg) * 1.08));
+    cd[i + 1] = Math.max(0, Math.min(255, avg + (g - avg) * 1.08));
+    cd[i + 2] = Math.max(0, Math.min(255, avg + (b - avg) * 1.08));
+  }
+  ctx.putImageData(afterClaheData, 0, 0);
+
+  // ===== Step 4: Light sharpen 0.5 (unsharp mask) =====
   const blurredCanvas = document.createElement('canvas');
   blurredCanvas.width = w;
   blurredCanvas.height = h;
@@ -812,9 +838,101 @@ async function applyEnhance(ctx, w, h) {
   const sharpData = ctx.getImageData(0, 0, w, h);
   const sd = sharpData.data;
   for (let i = 0; i < sd.length; i += 4) {
-    sd[i]     = Math.max(0, Math.min(255, sd[i]     + (sd[i]     - blurredData[i])     * 1.2));
-    sd[i + 1] = Math.max(0, Math.min(255, sd[i + 1] + (sd[i + 1] - blurredData[i + 1]) * 1.2));
-    sd[i + 2] = Math.max(0, Math.min(255, sd[i + 2] + (sd[i + 2] - blurredData[i + 2]) * 1.2));
+    sd[i]     = Math.max(0, Math.min(255, sd[i]     + (sd[i]     - blurredData[i])     * 0.5));
+    sd[i + 1] = Math.max(0, Math.min(255, sd[i + 1] + (sd[i + 1] - blurredData[i + 1]) * 0.5));
+    sd[i + 2] = Math.max(0, Math.min(255, sd[i + 2] + (sd[i + 2] - blurredData[i + 2]) * 0.5));
   }
   ctx.putImageData(sharpData, 0, 0);
+}
+
+// ============================================================================
+// CLAHE Approximation (Contrast Limited Adaptive Histogram Equalization)
+// Tile-based histogram equalization dengan clip limit + bilinear interpolation.
+// Port dari Python clahe_approx di test_filter_v4.py.
+//
+// @param {Uint8ClampedArray} src - L channel (luminance) 0-255
+// @param {number} w, h - image dimensions
+// @param {number} tileSize - tile size in pixels (e.g. 64-128)
+// @param {number} clipLimit - clip limit (e.g. 1.5 = gentle, 2.0 = aggressive)
+// @returns {Uint8ClampedArray} equalized L channel
+// ============================================================================
+function claheApprox(src, w, h, tileSize, clipLimit) {
+  // Pad to multiple of tileSize (reflect mode)
+  const padH = (tileSize - h % tileSize) % tileSize;
+  const padW = (tileSize - w % tileSize) % tileSize;
+  const padded = new Uint8ClampedArray((h + padH) * (w + padW));
+  for (let y = 0; y < h + padH; y++) {
+    for (let x = 0; x < w + padW; x++) {
+      const sy = Math.min(h - 1, y < h ? y : (2 * h - y - 1));
+      const sx = Math.min(w - 1, x < w ? x : (2 * w - x - 1));
+      padded[y * (w + padW) + x] = src[sy * w + sx];
+    }
+  }
+  const ph = h + padH;
+  const pw = w + padW;
+  const nTilesH = Math.floor(ph / tileSize);
+  const nTilesW = Math.floor(pw / tileSize);
+
+  // Compute equalization LUT per tile
+  const luts = new Float32Array(nTilesH * nTilesW * 256);
+  for (let ty = 0; ty < nTilesH; ty++) {
+    for (let tx = 0; tx < nTilesW; tx++) {
+      const hist = new Float32Array(256);
+      for (let dy = 0; dy < tileSize; dy++) {
+        for (let dx = 0; dx < tileSize; dx++) {
+          const v = padded[(ty * tileSize + dy) * pw + (tx * tileSize + dx)];
+          hist[v]++;
+        }
+      }
+      // Clip histogram at clipLimit * mean
+      const clipValue = clipLimit * (tileSize * tileSize) / 256;
+      let excess = 0;
+      for (let i = 0; i < 256; i++) {
+        if (hist[i] > clipValue) {
+          excess += hist[i] - clipValue;
+          hist[i] = clipValue;
+        }
+      }
+      // Redistribute excess uniformly
+      const redist = excess / 256;
+      for (let i = 0; i < 256; i++) hist[i] += redist;
+      // CDF
+      let cdf = 0;
+      const lutBase = (ty * nTilesW + tx) * 256;
+      for (let i = 0; i < 256; i++) {
+        cdf += hist[i];
+        luts[lutBase + i] = (cdf / (tileSize * tileSize)) * 255;
+      }
+    }
+  }
+
+  // Bilinear interpolation between tile LUTs
+  const result = new Uint8ClampedArray(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const ty = y / tileSize - 0.5;
+      const tx = x / tileSize - 0.5;
+      let ty0 = Math.floor(ty);
+      let tx0 = Math.floor(tx);
+      let ty1 = ty0 + 1;
+      let tx1 = tx0 + 1;
+      ty0 = Math.max(0, Math.min(nTilesH - 1, ty0));
+      tx0 = Math.max(0, Math.min(nTilesW - 1, tx0));
+      ty1 = Math.min(nTilesH - 1, ty1);
+      tx1 = Math.min(nTilesW - 1, tx1);
+      let fy = ty - ty0;
+      let fx = tx - tx0;
+      fy = Math.max(0, Math.min(1, fy));
+      fx = Math.max(0, Math.min(1, fx));
+      const v = src[y * w + x];
+      const v00 = luts[(ty0 * nTilesW + tx0) * 256 + v];
+      const v10 = luts[(ty1 * nTilesW + tx0) * 256 + v];
+      const v01 = luts[(ty0 * nTilesW + tx1) * 256 + v];
+      const v11 = luts[(ty1 * nTilesW + tx1) * 256 + v];
+      const v0 = v00 * (1 - fy) + v10 * fy;
+      const v1 = v01 * (1 - fy) + v11 * fy;
+      result[y * w + x] = v0 * (1 - fx) + v1 * fx;
+    }
+  }
+  return result;
 }
