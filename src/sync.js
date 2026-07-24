@@ -683,6 +683,10 @@ export async function createDocumentItemMultiPage(user, payload) {
 }
 
 // ===== Notes CRUD =====
+// v1.5.2 (P1/P2/P3 fixes): IndexedDB write DULU, baru cloud upsert.
+// Sebelumnya cloud upsert DULU → kalau hang, IndexedDB tidak pernah ditulis
+// → user lihat "catatan tidak tersinkron / hilang". Mirror v1.5.1 pattern
+// yang sudah fix untuk vault items (createScreenshotItem, createDocumentItem).
 export async function createNote(user, payload) {
   const noteId = genId('n');
   const now = new Date().toISOString();
@@ -700,36 +704,79 @@ export async function createNote(user, payload) {
     deleted_at: null,
     device_id: getDeviceId()
   };
-  const { error } = await supabase.from(NOTES_TABLE).upsert(row);
-  if (error) {
-    await dbEnqueueSync({ op: 'upsert_note', user_id: user.id, row });
-  }
+  // v1.5.2 (P1 fix): IndexedDB write PERTAMA — catatan pasti tersave lokal
+  // bahkan kalau cloud hang. UI baca dari IndexedDB.
   await dbPutNote(row);
+  try {
+    const { error } = await withTimeout(
+      supabase.from(NOTES_TABLE).upsert(row),
+      20000,
+      'note_upsert'
+    );
+    if (error) {
+      await dbEnqueueSync({ op: 'upsert_note', user_id: user.id, row });
+      return { ok: true, note: row, localOnly: true, error: error.message };
+    }
+  } catch (e) {
+    // Timeout / network error — catatan sudah ada di IndexedDB, queue untuk retry
+    await dbEnqueueSync({ op: 'upsert_note', user_id: user.id, row });
+    return { ok: true, note: row, localOnly: true, error: e.message };
+  }
   return { ok: true, note: row };
 }
 
 export async function updateNote(user, noteId, patch) {
   const now = new Date().toISOString();
   const updates = { ...patch, updated_at: now, device_id: getDeviceId() };
-  const { error } = await supabase.from(NOTES_TABLE).update(updates).eq('id', noteId);
-  if (error) {
+  // v1.5.2 (P2 fix): Ambil note lokal dulu (jangan skip kalau tidak ada).
+  // Sebelumnya: kalau note tidak ada di local cache (race condition dengan
+  // pullFromCloud), update lokal di-skip → edit tidak sinkron antar device.
+  // Sekarang: selalu upsert ke IndexedDB dengan merge.
+  const localNotes = await dbGetAllNotes();
+  const existing = localNotes.find(n => n.id === noteId) || {
+    id: noteId,
+    user_id: user.id,
+    created_at: now,
+    deleted_at: null
+  };
+  const merged = { ...existing, ...updates };
+  await dbPutNote(merged);
+  try {
+    const { error } = await withTimeout(
+      supabase.from(NOTES_TABLE).update(updates).eq('id', noteId),
+      20000,
+      'note_update'
+    );
+    if (error) {
+      await dbEnqueueSync({ op: 'update_note', user_id: user.id, note_id: noteId, patch: updates });
+      return { ok: true, localOnly: true, error: error.message };
+    }
+  } catch (e) {
     await dbEnqueueSync({ op: 'update_note', user_id: user.id, note_id: noteId, patch: updates });
-  }
-  // Update local cache
-  const local = await (await import('./db.js')).dbGetAllNotes();
-  const note = local.find(n => n.id === noteId);
-  if (note) {
-    await dbPutNote({ ...note, ...updates });
+    return { ok: true, localOnly: true, error: e.message };
   }
   return { ok: true };
 }
 
 export async function deleteNote(user, noteId) {
-  const { error } = await supabase.from(NOTES_TABLE).delete().eq('id', noteId);
-  if (error) {
-    await dbEnqueueSync({ op: 'delete_note', user_id: user.id, note_id: noteId });
-  }
+  // v1.5.2 (P3 fix): IndexedDB delete PERTAMA — ghost note hilang dari UI
+  // bahkan kalau cloud delete hang. Sebelumnya cloud delete DULU → kalau hang,
+  // note masih muncul di UI (ghost).
   await dbDeleteNote(noteId);
+  try {
+    const { error } = await withTimeout(
+      supabase.from(NOTES_TABLE).delete().eq('id', noteId),
+      20000,
+      'note_delete'
+    );
+    if (error) {
+      await dbEnqueueSync({ op: 'delete_note', user_id: user.id, note_id: noteId });
+      return { ok: true, localOnly: true, error: error.message };
+    }
+  } catch (e) {
+    await dbEnqueueSync({ op: 'delete_note', user_id: user.id, note_id: noteId });
+    return { ok: true, localOnly: true, error: e.message };
+  }
   return { ok: true };
 }
 
@@ -820,8 +867,10 @@ export async function pullFromCloud(user) {
       }
     }
     for (const row of notes) {
-      const local = await (await import('./db.js')).dbGetAllNotes();
-      const ln = local.find(n => n.id === row.id);
+      // v1.5.2 (P5 fix): Reuse localNotes yang sudah di-fetch di line ~807.
+      // Sebelumnya: setiap iterasi panggil `await import('./db.js').then(dbGetAllNotes)`
+      // → N+1 dynamic import + N+1 full table scan. Untuk 100 notes = 100x import + 100x query.
+      const ln = localNotes.find(n => n.id === row.id);
       if (!ln || new Date(row.updated_at) > new Date(ln.updated_at || 0)) {
         await dbPutNote(row);
       }

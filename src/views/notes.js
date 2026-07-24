@@ -135,7 +135,7 @@ export function renderNotes(user, onRefresh) {
     </div>
     <div class="notes-toolbar">
       <div class="notes-search-wrap" id="notesSearchWrap">
-        <input type="text" class="notes-search" id="noteSearch" placeholder="🔍 Cari catatan... (Enter)">
+        <input type="search" enterkeyhint="search" autocomplete="off" spellcheck="false" class="notes-search" id="noteSearch" placeholder="🔍 Cari catatan... (Enter)">
         <button class="notes-search-clear" id="noteSearchClear" title="Hapus pencarian" aria-label="Hapus pencarian" style="display:none">✕</button>
       </div>
       <select class="notes-sort" id="noteSort" title="Urutkan">
