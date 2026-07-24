@@ -529,6 +529,33 @@ export async function deleteVaultItem(user, itemId) {
   return { ok: true };
 }
 
+// ===== v1.6.4: Update vault item (title, annotationNote, etc.) =====
+export async function updateVaultItem(user, itemId, patch) {
+  if (!user || !itemId) return { ok: false, error: 'invalid_args' };
+  const now = new Date().toISOString();
+  const updates = { ...patch, updated_at: now, device_id: getDeviceId() };
+
+  // Update di Supabase
+  try {
+    const { error } = await withTimeout(
+      supabase.from(VAULT_TABLE).update(updates).eq('id', itemId),
+      15000, 'vault_update'
+    );
+    if (error) {
+      await dbEnqueueSync({ op: 'update_vault', user_id: user.id, item_id: itemId, patch: updates });
+    }
+  } catch (e) {
+    await dbEnqueueSync({ op: 'update_vault', user_id: user.id, item_id: itemId, patch: updates });
+  }
+
+  // Update di IndexedDB
+  const local = await dbGetVaultItem(itemId);
+  if (local) {
+    await dbPutVaultItem({ ...local, ...updates });
+  }
+  return { ok: true };
+}
+
 // ===== v1.3.0: Document item (CamScanner-like) =====
 // Sama seperti createScreenshotItem, tapi type='document' dan source.pages berisi metadata halaman.
 // Phase 2: single page only. Phase 5 (later): multi-page batch.

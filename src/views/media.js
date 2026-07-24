@@ -4,7 +4,7 @@
 // v1.1.0: Tambah "Copy Teks Saja" di batch mode.
 // v1.3.0: Tambah type='document' (CamScanner-like) — list display + viewer + startDocumentFlow
 
-import { deleteVaultItem, getOrDownloadScreenshotBlob, createScreenshotItem, createDocumentItem, createDocumentItemMultiPage } from '../sync.js';
+import { deleteVaultItem, getOrDownloadScreenshotBlob, createScreenshotItem, createDocumentItem, createDocumentItemMultiPage, updateVaultItem } from '../sync.js';
 import { buildScreenshotCaption, buildBatchCaption, writeScreenshotToClipboard } from '../copy-format.js';
 import { dbGetAllVaultItems } from '../db.js';
 import { pickImage, pasteFromClipboard } from '../capture.js';
@@ -135,41 +135,56 @@ function updateBatchUI() {
 }
 
 async function openItemDetail(id) {
-  const items = await dbGetAllVaultItems();
-  const item = items.find(i => i.id === id);
-  if (!item) return;
+  const allItems = (await dbGetAllVaultItems()).filter(i => (i.type === 'screenshot' || i.type === 'document') && !i.archived);
+  allItems.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
+  const itemIdx = allItems.findIndex(i => i.id === id);
+  if (itemIdx < 0) return;
+  const item = allItems[itemIdx];
+
   // v1.4.0: Route ke multi-page document viewer kalau type='document'
   if (item.type === 'document') {
     openDocumentViewer(item, refreshList);
     return;
   }
+
   showToast('Memuat gambar...');
   const blobRes = await getOrDownloadScreenshotBlob(item);
-  const dataUrl = blobRes.dataUrl;
-  // v1.6.1: Better error message untuk orphan URL (file tidak ada di cloud)
+  let dataUrl = blobRes.dataUrl;
   if (!dataUrl && blobRes.error === 'file_not_found_in_cloud') {
-    showToast('⚠ Gambar belum ter-upload ke cloud. Sync sedang retry. Coba lagi nanti atau hapus item ini.', true);
+    showToast('⚠ Gambar belum ter-upload ke cloud. Sync sedang retry.', true);
   } else if (!dataUrl && blobRes.error && blobRes.error !== 'no_cloud_url') {
     showToast('⚠ Gagal memuat: ' + blobRes.error, true);
   }
-  const cap = buildScreenshotCaption(item, dataUrl);
+
+  let currentItem = item;
+  function getCap() { return buildScreenshotCaption(currentItem, dataUrl); }
+  let cap = getCap();
+
   const modal = document.createElement('div');
   modal.className = 'modal-overlay';
   modal.innerHTML = `
     <div class="modal-card">
       <div class="modal-header">
-        <h3>${escapeHtml(item.title || 'Screenshot')}</h3>
+        <h3 id="viewerTitle">${escapeHtml(currentItem.title || 'Screenshot')}</h3>
+        <button class="icon-btn" data-action="edit-title" title="Edit judul">✏️</button>
         <button class="icon-btn" data-action="close">✕</button>
       </div>
       <div class="modal-body">
-        ${dataUrl ? `<img src="${dataUrl}" style="max-width:100%;border-radius:8px">` : '<div class="empty">Gambar tidak tersedia</div>'}
-        <div class="caption-preview">${escapeHtml(cap.textPlain).replace(/\n/g, '<br>')}</div>
+        <div id="viewerImage">${dataUrl ? `<img src="${dataUrl}" style="max-width:100%;border-radius:8px">` : '<div class="empty">Gambar tidak tersedia</div>'}</div>
+        <div class="caption-preview" id="viewerCaption">${escapeHtml(cap.textPlain).replace(/\n/g, '<br>')}</div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-secondary" data-action="copy-img">🖼️ Gambar</button>
         <button class="btn btn-primary" data-action="copy-cap">📋 + Keterangan</button>
-        <button class="btn btn-secondary" data-action="copy-text">📝 Teks</button>
+        <button class="btn btn-secondary" data-action="edit-note" title="Edit catatan anotasi">📝 Catatan</button>
         <button class="btn btn-danger" data-action="delete">🗑️</button>
+      </div>
+      <div class="viewer-navigator" id="viewerNav">
+        <button class="btn btn-secondary" data-action="prev-item" ${itemIdx === 0 ? 'disabled' : ''}>◀</button>
+        <select id="viewerSelect" class="viewer-select">
+          ${allItems.map((it, i) => `<option value="${it.id}" ${i === itemIdx ? 'selected' : ''}>${escapeHtml((it.title || 'Untitled').slice(0, 40))}</option>`).join('')}
+        </select>
+        <button class="btn btn-secondary" data-action="next-item" ${itemIdx === allItems.length - 1 ? 'disabled' : ''}>▶</button>
       </div>
     </div>
   `;
@@ -181,32 +196,117 @@ async function openItemDetail(id) {
     setTimeout(() => { if (modal.parentNode) document.body.removeChild(modal); }, 200);
   };
 
+  async function switchTo(newIdx) {
+    if (newIdx < 0 || newIdx >= allItems.length) return;
+    const newItem = allItems[newIdx];
+    currentItem = newItem;
+    // Update title
+    modal.querySelector('#viewerTitle').textContent = newItem.title || 'Screenshot';
+    // Update select
+    modal.querySelector('#viewerSelect').value = newItem.id;
+    // Update prev/next disabled state
+    modal.querySelector('[data-action="prev-item"]').disabled = (newIdx === 0);
+    modal.querySelector('[data-action="next-item"]').disabled = (newIdx === allItems.length - 1);
+    // Load image
+    modal.querySelector('#viewerImage').innerHTML = '<div class="loading">Memuat...</div>';
+    showToast('Memuat gambar...');
+    const res = await getOrDownloadScreenshotBlob(newItem);
+    dataUrl = res.dataUrl;
+    cap = getCap();
+    modal.querySelector('#viewerImage').innerHTML = dataUrl
+      ? `<img src="${dataUrl}" style="max-width:100%;border-radius:8px">`
+      : '<div class="empty">Gambar tidak tersedia</div>';
+    modal.querySelector('#viewerCaption').innerHTML = escapeHtml(cap.textPlain).replace(/\n/g, '<br>');
+    // Update currentIdx for prev/next
+    modal.dataset.currentIdx = newIdx;
+  }
+
   modal.addEventListener('click', async (e) => {
     const btn = e.target.closest('button');
+    const sel = e.target.closest('select');
+    if (sel) return; // select change handled separately
+
     if (!btn) {
       if (e.target === modal) close();
       return;
     }
     const action = btn.dataset.action;
     if (action === 'close') { close(); return; }
+
+    // v1.6.4: Navigator — prev/next/select
+    if (action === 'prev-item') {
+      const idx = parseInt(modal.dataset.currentIdx || itemIdx);
+      await switchTo(idx - 1);
+      return;
+    }
+    if (action === 'next-item') {
+      const idx = parseInt(modal.dataset.currentIdx || itemIdx);
+      await switchTo(idx + 1);
+      return;
+    }
+
+    // v1.6.4: Edit title
+    if (action === 'edit-title') {
+      const newTitle = prompt('Edit judul:', currentItem.title || '');
+      if (newTitle && newTitle.trim() && newTitle.trim() !== currentItem.title) {
+        await updateVaultItem(window.__rfUser, currentItem.id, { title: newTitle.trim() });
+        currentItem.title = newTitle.trim();
+        // Update allItems array
+        const idx = allItems.findIndex(i => i.id === currentItem.id);
+        if (idx >= 0) allItems[idx].title = newTitle.trim();
+        modal.querySelector('#viewerTitle').textContent = newTitle.trim();
+        // Update select option text
+        const opt = modal.querySelector(`#viewerSelect option[value="${currentItem.id}"]`);
+        if (opt) opt.textContent = newTitle.trim().slice(0, 40);
+        cap = getCap();
+        modal.querySelector('#viewerCaption').innerHTML = escapeHtml(cap.textPlain).replace(/\n/g, '<br>');
+        showToast('✓ Judul diubah');
+        refreshList();
+      }
+      return;
+    }
+
+    // v1.6.4: Edit annotation note
+    if (action === 'edit-note') {
+      const existingNote = currentItem.source?.annotationNote || currentItem.annotation_note || '';
+      const newNote = prompt('Catatan anotasi (opsional — kosongkan untuk hapus):', existingNote);
+      if (newNote !== null) {
+        const noteVal = newNote.trim();
+        const newSource = { ...(currentItem.source || {}), annotationNote: noteVal };
+        await updateVaultItem(window.__rfUser, currentItem.id, { source: newSource });
+        currentItem.source = newSource;
+        cap = getCap();
+        modal.querySelector('#viewerCaption').innerHTML = escapeHtml(cap.textPlain).replace(/\n/g, '<br>');
+        showToast(noteVal ? '✓ Catatan disimpan' : '✓ Catatan dihapus');
+        refreshList();
+      }
+      return;
+    }
+
     if (action === 'copy-img') {
       const r = await writeScreenshotToClipboard(dataUrl, '', '');
       showToast(r.ok ? r.message : 'Gagal: ' + r.error, !r.ok);
     } else if (action === 'copy-cap') {
       const r = await writeScreenshotToClipboard(dataUrl, cap.textPlain, cap.textHtml);
       showToast(r.ok ? r.message : 'Gagal: ' + r.error, !r.ok);
-    } else if (action === 'copy-text') {
-      try { await navigator.clipboard.writeText(cap.textPlain); showToast('✓ Teks tersalin'); }
-      catch (e) { showToast('Gagal: ' + e.message, true); }
     } else if (action === 'delete') {
-      if (!confirm('Hapus screenshot ini? Tidak bisa di-undo.')) return;
-      await deleteVaultItem(window.__rfUser, id);
+      if (!confirm('Hapus item ini? Tidak bisa di-undo.')) return;
+      await deleteVaultItem(window.__rfUser, currentItem.id);
       showToast('✓ Dihapus');
       close();
       refreshList();
       if (_onRefresh) _onRefresh();
     }
   });
+
+  // Select change → switch item
+  modal.querySelector('#viewerSelect').addEventListener('change', async (e) => {
+    const newId = e.target.value;
+    const newIdx = allItems.findIndex(i => i.id === newId);
+    if (newIdx >= 0) await switchTo(newIdx);
+  });
+
+  modal.dataset.currentIdx = itemIdx;
 }
 
 // ===== v1.3.0: Document viewer (CamScanner-like) =====

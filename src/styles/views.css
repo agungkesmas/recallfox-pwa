@@ -587,3 +587,17 @@
   padding: 8px 12px; border-radius: 6px;
   border: 1px solid var(--border); background: var(--surface);
 }
+
+/* ===== v1.6.4: Viewer navigator (prev/next/select) ===== */
+.viewer-navigator {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 12px; border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+.viewer-navigator .btn { padding: 6px 10px; font-size: 14px; flex: none; }
+.viewer-navigator .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.viewer-select {
+  flex: 1; padding: 6px 8px; border: 1px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--bg); color: var(--text);
+  font-size: 12px; min-width: 0;
+}
