@@ -77,9 +77,15 @@ async function generateThumbnail(dataUrl, maxSize = 200) {
 }
 
 // ===== Upload screenshot blob ke Supabase Storage =====
+// v1.5.3: Selalu return path (predictable URL pattern) bahkan kalau upload gagal.
+// Ini supaya createScreenshotItem bisa simpan gdrive_file_id berdasarkan path,
+// dan addon (v3.13.4) bisa reconstruct URL dari pattern user-<uid>/<id>.png
+// kalau file berhasil di-upload later via retry queue.
 export async function uploadScreenshotBlob(user, itemId, dataUrl) {
   if (!user || !itemId || !dataUrl) return { ok: false, error: 'invalid_args' };
   const path = `user-${user.id}/${itemId}.png`;
+  // v1.5.3: Predictable URL — selalu bisa dihitung dari path, bahkan sebelum upload
+  const predictableUrl = `${supabase.supabaseUrl}/storage/v1/object/public/${STORAGE_BUCKET}/${path}`;
   try {
     console.log('[RecallFox] uploadScreenshotBlob START:', itemId, 'path:', path);
     // Convert dataUrl → Blob (pakai atob lebih reliable di mobile dibanding fetch)
@@ -92,10 +98,10 @@ export async function uploadScreenshotBlob(user, itemId, dataUrl) {
       } catch (e) {
         console.warn('[RecallFox] dataUrl fetch failed, fallback ke atob manual:', e.message);
         // Fallback terakhir: coba decode manual kalau ada
-        if (!blob) return { ok: false, error: 'blob_conversion_failed: ' + e.message };
+        if (!blob) return { ok: false, error: 'blob_conversion_failed: ' + e.message, path, predictableUrl };
       }
     }
-    if (!blob) return { ok: false, error: 'blob_conversion_failed' };
+    if (!blob) return { ok: false, error: 'blob_conversion_failed', path, predictableUrl };
     // Convert ke PNG kalau perlu
     let pngBlob;
     if (blob.type === 'image/png') {
@@ -108,7 +114,7 @@ export async function uploadScreenshotBlob(user, itemId, dataUrl) {
       canvas.getContext('2d').drawImage(img, 0, 0);
       pngBlob = await new Promise(r => canvas.toBlob(r, 'image/png'));
     }
-    if (!pngBlob) return { ok: false, error: 'png_conversion_failed' };
+    if (!pngBlob) return { ok: false, error: 'png_conversion_failed', path, predictableUrl };
     // v1.5.1: wrap storage.upload dengan timeout 20s — kalau Supabase Storage
     // hang (project paused, network issue, dll), jangan block save selamanya.
     const { error } = await withTimeout(
@@ -118,14 +124,16 @@ export async function uploadScreenshotBlob(user, itemId, dataUrl) {
     );
     if (error) {
       console.error('[RecallFox] storage.upload error:', error.message);
-      return { ok: false, error: error.message };
+      // v1.5.3: Return path + predictableUrl supaya caller tetap simpan gdrive_file_id
+      // (bisa dipakai addon reconstruct URL kalau retry upload berhasil later)
+      return { ok: false, error: error.message, path, predictableUrl };
     }
-    const url = `${supabase.supabaseUrl}/storage/v1/object/public/${STORAGE_BUCKET}/${path}`;
     console.log('[RecallFox] uploadScreenshotBlob OK:', itemId);
-    return { ok: true, url, path };
+    return { ok: true, url: predictableUrl, path };
   } catch (e) {
     console.error('[RecallFox] uploadScreenshotBlob exception:', e.message);
-    return { ok: false, error: e.message };
+    // v1.5.3: Return path + predictableUrl bahkan pada exception
+    return { ok: false, error: e.message, path, predictableUrl };
   }
 }
 
@@ -230,8 +238,12 @@ export async function createScreenshotItem(user, payload) {
     screenshot_format: 'png',
     screenshot_bytes: payload.dataUrl?.length || 0,
     thumbnail_data_url: thumbnailDataUrl,
-    gdrive_file_id: upRes.ok ? upRes.path : null,
-    gdrive_file_url: upRes.ok ? upRes.url : null,
+    // v1.5.3: Selalu simpan path + predictableUrl bahkan kalau upload gagal.
+    // Addon v3.13.4 bisa reconstruct URL dari pattern + coba fetch. Kalau retry
+    // upload berhasil nanti, file akan ada di predictableUrl ini.
+    // Sebelumnya: null kalau upload gagal → addon tidak bisa muat gambar sama sekali.
+    gdrive_file_id: upRes.path || null,
+    gdrive_file_url: upRes.predictableUrl || upRes.url || null,
     toppings: [],
     variables: [],
     favorite: false,
@@ -949,21 +961,35 @@ export async function processSyncQueue(user) {
         const upRes = await uploadScreenshotBlob(user, entry.item_id, entry.data_url);
         if (upRes.ok) {
           // Update vault_items row dengan gdrive_file_url
-          await supabase.from(VAULT_TABLE).update({
-            gdrive_file_id: upRes.path,
-            gdrive_file_url: upRes.url,
-            updated_at: new Date().toISOString()
-          }).eq('id', entry.item_id);
+          // v1.5.3: Wrap dengan timeout supaya retry tidak hang
+          try {
+            await withTimeout(
+              supabase.from(VAULT_TABLE).update({
+                gdrive_file_id: upRes.path,
+                gdrive_file_url: upRes.url,
+                updated_at: new Date().toISOString()
+              }).eq('id', entry.item_id),
+              15000,
+              'retry_vault_update'
+            );
+          } catch (e) {
+            console.warn('[RecallFox] retry vault_items update failed:', e.message);
+            // Upload sudah berhasil, jangan re-queue — update cloud next pull akan sync
+          }
           // v1.2.0: Juga insert ke screenshots table
           try {
-            await supabase.from(SCREENSHOTS_TABLE).upsert({
-              id: entry.item_id,
-              user_id: user.id,
-              vault_item_id: entry.item_id,
-              storage_path: upRes.path,
-              storage_url: upRes.url,
-              captured_at: new Date().toISOString()
-            });
+            await withTimeout(
+              supabase.from(SCREENSHOTS_TABLE).upsert({
+                id: entry.item_id,
+                user_id: user.id,
+                vault_item_id: entry.item_id,
+                storage_path: upRes.path,
+                storage_url: upRes.url,
+                captured_at: new Date().toISOString()
+              }),
+              15000,
+              'retry_screenshots_upsert'
+            );
           } catch (e) { /* non-fatal */ }
           await dbDeleteSyncQueueItem(entry.id);
         }
