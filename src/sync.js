@@ -81,45 +81,54 @@ async function generateThumbnail(dataUrl, maxSize = 200) {
 // Ini supaya createScreenshotItem bisa simpan gdrive_file_id berdasarkan path,
 // dan addon (v3.13.4) bisa reconstruct URL dari pattern user-<uid>/<id>.png
 // kalau file berhasil di-upload later via retry queue.
+//
+// v1.6.2: AUTO-COMPRESS sebelum upload — root cause "capture gagal sync":
+//   Annotate editor output PNG lossless bisa 5-10MB untuk foto HP 12MP.
+//   Upload 5-10MB dari HP dengan koneksi lambat → timeout 20s → fail.
+//   Solusi: compress ke JPEG max 1920px quality 0.85 → ~200-500KB → upload cepat.
+//   User tidak pernah lihat perbedaan kualitas (layar HP cuma 1080p).
 export async function uploadScreenshotBlob(user, itemId, dataUrl) {
   if (!user || !itemId || !dataUrl) return { ok: false, error: 'invalid_args' };
-  const path = `user-${user.id}/${itemId}.png`;
+  const path = `user-${user.id}/${itemId}.jpg`;  // v1.6.2: .jpg (bukan .png) — compressed
   // v1.5.3: Predictable URL — selalu bisa dihitung dari path, bahkan sebelum upload
   const predictableUrl = `${supabase.supabaseUrl}/storage/v1/object/public/${STORAGE_BUCKET}/${path}`;
   try {
-    console.log('[RecallFox] uploadScreenshotBlob START:', itemId, 'path:', path);
-    // Convert dataUrl → Blob (pakai atob lebih reliable di mobile dibanding fetch)
-    // v1.5.1: wrap fetch(dataUrl) dengan timeout — dataUrl besar bisa stall di HP low-end
-    let blob = dataUrlToBlob(dataUrl);
-    if (!blob) {
-      try {
-        const res = await withTimeout(fetch(dataUrl), 10000, 'dataUrl_fetch');
-        blob = await res.blob();
-      } catch (e) {
-        console.warn('[RecallFox] dataUrl fetch failed, fallback ke atob manual:', e.message);
-        // Fallback terakhir: coba decode manual kalau ada
-        if (!blob) return { ok: false, error: 'blob_conversion_failed: ' + e.message, path, predictableUrl };
+    console.log('[RecallFox] uploadScreenshotBlob START:', itemId, 'path:', path, 'dataUrl size:', Math.round(dataUrl.length * 0.75 / 1024) + 'KB');
+
+    // v1.6.2: COMPRESS dataUrl ke JPEG max 1920px quality 0.85 sebelum upload.
+    // Ini menjamin upload cepat (<500KB) bahkan untuk foto HP 12MP.
+    let uploadBlob;
+    let uploadContentType = 'image/jpeg';
+    try {
+      const compressed = await compressForUpload(dataUrl, 1920, 0.85);
+      uploadBlob = compressed.blob;
+      console.log('[RecallFox] compressed:', Math.round(dataUrl.length * 0.75 / 1024) + 'KB →', Math.round(uploadBlob.size / 1024) + 'KB');
+    } catch (e) {
+      console.warn('[RecallFox] compress failed, fallback ke dataUrlToBlob:', e.message);
+      // Fallback: pakai dataUrl asli (mungkin PNG kecil dari screenshot addon)
+      uploadBlob = dataUrlToBlob(dataUrl);
+      if (!uploadBlob) {
+        try {
+          const res = await withTimeout(fetch(dataUrl), 10000, 'dataUrl_fetch');
+          uploadBlob = await res.blob();
+        } catch (e2) {
+          return { ok: false, error: 'blob_conversion_failed: ' + e2.message, path, predictableUrl };
+        }
       }
+      // Set content type sesuai blob asli
+      uploadContentType = uploadBlob.type || 'image/jpeg';
     }
-    if (!blob) return { ok: false, error: 'blob_conversion_failed', path, predictableUrl };
-    // Convert ke PNG kalau perlu
-    let pngBlob;
-    if (blob.type === 'image/png') {
-      pngBlob = blob;
-    } else {
-      const img = await createImageBitmap(blob);
-      const canvas = document.createElement('canvas');
-      canvas.width = img.width;
-      canvas.height = img.height;
-      canvas.getContext('2d').drawImage(img, 0, 0);
-      pngBlob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+
+    if (!uploadBlob || uploadBlob.size === 0) {
+      return { ok: false, error: 'empty_blob_after_compress', path, predictableUrl };
     }
-    if (!pngBlob) return { ok: false, error: 'png_conversion_failed', path, predictableUrl };
+
     // v1.5.1: wrap storage.upload dengan timeout 20s — kalau Supabase Storage
     // hang (project paused, network issue, dll), jangan block save selamanya.
+    // v1.6.2: timeout 30s (naik dari 20s) supaya lebih tolerance koneksi lambat.
     const { error } = await withTimeout(
-      supabase.storage.from(STORAGE_BUCKET).upload(path, pngBlob, { contentType: 'image/png', upsert: true }),
-      20000,
+      supabase.storage.from(STORAGE_BUCKET).upload(path, uploadBlob, { contentType: uploadContentType, upsert: true }),
+      30000,
       'storage_upload'
     );
     if (error) {
@@ -137,15 +146,66 @@ export async function uploadScreenshotBlob(user, itemId, dataUrl) {
   }
 }
 
+// v1.6.2: Compress dataUrl untuk upload — JPEG max 1920px quality 0.85.
+// Kenapa: PNG lossless dari annotate editor bisa 5-10MB → upload timeout di HP.
+// JPEG 1920px 0.85 → ~200-500KB → upload cepat, kualitas tetap bagus untuk layar HP.
+// @returns {Promise<{blob: Blob, width: number, height: number}>}
+async function compressForUpload(dataUrl, maxDim = 1920, quality = 0.85) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const origW = img.naturalWidth;
+        const origH = img.naturalHeight;
+        let outW = origW;
+        let outH = origH;
+        // Scale down kalau lebih besar dari maxDim (preserve aspect ratio)
+        if (Math.max(origW, origH) > maxDim) {
+          const scale = maxDim / Math.max(origW, origH);
+          outW = Math.round(origW * scale);
+          outH = Math.round(origH * scale);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = outW;
+        canvas.height = outH;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        // White background (JPEG no transparency)
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, outW, outH);
+        ctx.drawImage(img, 0, 0, outW, outH);
+        canvas.toBlob((blob) => {
+          if (!blob) reject(new Error('toBlob returned null'));
+          else resolve({ blob, width: outW, height: outH });
+        }, 'image/jpeg', quality);
+      } catch (e) {
+        reject(e);
+      }
+    };
+    img.onerror = () => reject(new Error('image load failed in compressForUpload'));
+    img.src = dataUrl;
+  });
+}
+
 export async function deleteScreenshotBlob(user, itemId) {
   if (!user || !itemId) return { ok: false, error: 'invalid_args' };
-  const path = `user-${user.id}/${itemId}.png`;
+  // v1.6.2: Hapus kedua kemungkinan path (.jpg v1.6.2+ dan .png versi lama)
+  // supaya cleanup lengkap tidak ada orphan file di Storage.
+  const paths = [
+    `user-${user.id}/${itemId}.jpg`,  // v1.6.2+
+    `user-${user.id}/${itemId}.png`   // versi lama
+  ];
   try {
-    const { error } = await supabase.storage.from(STORAGE_BUCKET).remove([path]);
-    if (error) return { ok: false, error: error.message };
+    const { error } = await supabase.storage.from(STORAGE_BUCKET).remove(paths);
+    if (error) {
+      console.warn('[RecallFox] deleteScreenshotBlob error (non-fatal):', error.message);
+      // Return ok=true anyway — vault_items row delete lebih penting dari Storage cleanup
+    }
     return { ok: true };
   } catch (e) {
-    return { ok: false, error: e.message };
+    console.warn('[RecallFox] deleteScreenshotBlob exception (non-fatal):', e.message);
+    return { ok: true };
   }
 }
 
@@ -207,7 +267,8 @@ export async function createScreenshotItem(user, payload) {
   // payload: { dataUrl, width, height, mode, title, annotationNote, sourceUrl, sourceTitle }
   const itemId = genId('sh');
   const now = new Date().toISOString();
-  console.log('[RecallFox] createScreenshotItem START:', itemId, 'user:', user?.id, 'mode:', payload?.mode);
+  const dataUrlSizeKB = payload.dataUrl ? Math.round(payload.dataUrl.length * 0.75 / 1024) : 0;
+  console.log('[RecallFox] createScreenshotItem START:', itemId, 'user:', user?.id, 'mode:', payload?.mode, 'dataUrl size:', dataUrlSizeKB + 'KB');
   const thumbnailDataUrl = await generateThumbnail(payload.dataUrl, 200);
 
   // Step 1: Upload blob ke Storage DULU
@@ -215,6 +276,7 @@ export async function createScreenshotItem(user, payload) {
   let storageOk = upRes.ok;
   let storageError = upRes.error || null;
   if (!storageOk) {
+    console.warn('[RecallFox] Storage upload FAILED, enqueuing for retry. Error:', storageError, '| dataUrl size:', dataUrlSizeKB + 'KB');
     // Enqueue untuk retry di background
     await dbEnqueueSync({
       op: 'upload_screenshot',
@@ -223,7 +285,8 @@ export async function createScreenshotItem(user, payload) {
       data_url: payload.dataUrl,
       payload
     });
-    console.warn('[RecallFox] Storage upload failed, enqueued for retry:', storageError);
+  } else {
+    console.log('[RecallFox] Storage upload OK, URL:', upRes.url);
   }
 
   const row = {
@@ -334,19 +397,23 @@ export async function createScreenshotItem(user, payload) {
   // Step 4: Return status akurat
   // v1.5.1: Data SUDAH di IndexedDB (step 2) — return ok:true bahkan kalau
   // cloud gagal, supaya UI tampilkan item di media tab + toast akurat.
+  // v1.6.2: Trigger immediate retry sync queue kalau ada failure — tidak tunggu
+  //   interval 30s. Kadang first attempt gagal karena network blip, retry langsung sukses.
   if (storageOk && upsertOk) {
     console.log('[RecallFox] createScreenshotItem OK (cloud synced):', itemId);
     return { ok: true, item: row, synced: true };
   }
   if (upsertOk && !storageOk) {
     // vault_items saved, but blob upload failed — retry in background
-    console.log('[RecallFox] createScreenshotItem PARTIAL (vault saved, blob pending):', itemId);
+    console.log('[RecallFox] createScreenshotItem PARTIAL (vault saved, blob pending):', itemId, '| storageError:', storageError);
+    // v1.6.2: Trigger immediate retry (async, non-blocking)
+    setTimeout(() => processSyncQueue(user).catch(e => console.warn('[RecallFox] immediate retry failed:', e.message)), 2000);
     return {
       ok: true,
       item: row,
       synced: false,
       partial: true,
-      warning: 'Metadata tersimpan, gambar sedang diupload ulang',
+      warning: 'Tersimpan — gambar sedang diupload ulang otomatis',
       storageError
     };
   }
@@ -354,6 +421,8 @@ export async function createScreenshotItem(user, payload) {
   // v1.5.1: Tetap return ok:true + localOnly supaya UI tetap tampilkan item
   // (item sudah ada di IndexedDB dari step 2). Toast bilang "lokal".
   console.log('[RecallFox] createScreenshotItem LOCAL-ONLY:', itemId, 'errors:', { upsertError, storageError });
+  // v1.6.2: Trigger immediate retry (async, non-blocking)
+  setTimeout(() => processSyncQueue(user).catch(e => console.warn('[RecallFox] immediate retry failed:', e.message)), 2000);
   return {
     ok: true,                  // v1.5.1: changed from false → true (data IS saved locally)
     item: row,
