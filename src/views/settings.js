@@ -1,13 +1,26 @@
-// src/views/settings.js — Settings view: account + sync status
+// src/views/settings.js — Settings view: account + sync status + about
+// v1.7.1: Fix version label (sebelumnya hardcoded "v1.0.0"), tambah info lengkap
 
 import { signOut } from '../auth.js';
 import { processSyncQueue } from '../sync.js';
-import { dbGetSyncQueue } from '../db.js';
+import { dbGetSyncQueue, dbGetAllVaultItems, dbGetAllNotes } from '../db.js';
 
 export async function renderSettings(user, onLogout) {
   const main = document.getElementById('appMain');
   if (!main) return;
   const queue = await dbGetSyncQueue();
+  const vaultItems = await dbGetAllVaultItems();
+  const notes = await dbGetAllNotes();
+  const version = '1.7.1';
+
+  // Hitung statistik per tipe
+  const typeStats = {};
+  for (const item of vaultItems) {
+    if (item.deleted_at) continue;
+    const t = item.type || 'unknown';
+    typeStats[t] = (typeStats[t] || 0) + 1;
+  }
+
   main.innerHTML = `
     <div class="view-header">
       <h2>⚙️ Akun</h2>
@@ -34,10 +47,39 @@ export async function renderSettings(user, onLogout) {
         <button class="btn btn-danger" id="logoutBtn">🚪 Keluar</button>
       </div>
     </div>
+
+    <div class="settings-card">
+      <h3>📊 Statistik Vault</h3>
+      <div class="setting-row">
+        <span>Total item</span>
+        <strong>${vaultItems.filter(i => !i.deleted_at).length}</strong>
+      </div>
+      ${Object.entries(typeStats).map(([type, count]) => {
+        const labels = {
+          prompt: '💬 Prompt',
+          context: '📋 Konteks',
+          snapshot: '📸 Snapshot',
+          screenshot: '🖼️ Media',
+          document: '📄 Dokumen',
+          link: '🔗 Link',
+          bundle: '📦 Bundle'
+        };
+        return `<div class="setting-row"><span>${labels[type] || type}</span><strong>${count}</strong></div>`;
+      }).join('')}
+      <div class="setting-row">
+        <span>📝 Catatan</span>
+        <strong>${notes.length}</strong>
+      </div>
+    </div>
+
     <div class="settings-card">
       <h3>Tentang</h3>
-      <p>RecallFox PWA v1.0.0 — cross-device media + notes sync.</p>
+      <p>RecallFox PWA <strong>v${version}</strong> — cross-device media + notes + vault sync.</p>
       <p>Pakai kredensial Supabase yang sama dengan addon Firefox. Realtime sync aktif otomatis saat online.</p>
+      <p style="margin-top:8px;font-size:11px;color:var(--text-muted)">
+        <a href="https://github.com/agungkesmas/recallfox-pwa" target="_blank" rel="noopener">GitHub Repo</a> ·
+        <a href="https://github.com/agungkesmas/recallfox" target="_blank" rel="noopener">Addon Repo</a>
+      </p>
     </div>
   `;
   document.getElementById('logoutBtn').addEventListener('click', async () => {
