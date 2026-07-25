@@ -14,6 +14,7 @@ import { renderLogin } from './views/login.js';
 import { renderMedia, startCaptureFlow, startDocumentFlow } from './views/media.js';
 import { renderNotes, openNoteEditor } from './views/notes.js';
 import { renderSettings } from './views/settings.js';
+import { renderVault } from './views/vault.js';  // v1.7.0: Vault teks (prompt, context, snapshot, link, bundle)
 
 let _currentView = 'media';
 let _realtimeBound = false;
@@ -86,7 +87,7 @@ async function showApp(user) {
   if (!_realtimeBound) {
     subscribeRealtime(user, () => {
       // Realtime event (kalau ada) → re-render current view
-      if (_currentView === 'media' || _currentView === 'notes') {
+      if (_currentView === 'media' || _currentView === 'vault' || _currentView === 'notes') {
         navigateTo(_currentView);
       }
     });
@@ -136,7 +137,7 @@ function startPolling(user) {
         console.log('[RecallFox] Polling: cloud changed, pulling...', { vaultChanged, notesChanged });
         await pullFromCloud(user);
         _lastPullAt = Date.now();
-        if (_currentView === 'media' || _currentView === 'notes') {
+        if (_currentView === 'media' || _currentView === 'vault' || _currentView === 'notes') {
           navigateTo(_currentView);
         }
       }
@@ -203,6 +204,9 @@ function renderShell(user) {
       <nav class="bottom-nav">
         <button class="nav-btn ${_currentView === 'media' ? 'active' : ''}" data-view="media">
           <span class="nav-ic">📸</span><span class="nav-lb">Media</span>
+        </button>
+        <button class="nav-btn ${_currentView === 'vault' ? 'active' : ''}" data-view="vault">
+          <span class="nav-ic">🗂️</span><span class="nav-lb">Vault</span>
         </button>
         <button class="nav-btn ${_currentView === 'notes' ? 'active' : ''}" data-view="notes">
           <span class="nav-ic">📝</span><span class="nav-lb">Catatan</span>
@@ -289,6 +293,7 @@ function navigateTo(view) {
   const user = window.__rfUser;
   if (!user) return;
   if (view === 'media') renderMedia(user, refreshCurrentView);
+  else if (view === 'vault') renderVault(user, refreshCurrentView);  // v1.7.0
   else if (view === 'notes') renderNotes(user, refreshCurrentView);
   else if (view === 'settings') renderSettings(user, () => showLogin());
 }
