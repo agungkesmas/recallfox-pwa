@@ -10,12 +10,12 @@
 //   4. State update instan: dbPutVaultItem langsung + updateVaultItem cloud, renderList() (bukan reload)
 
 import { dbGetAllVaultItems, dbPutVaultItem, dbDeleteVaultItem } from '../db.js';
-import { deleteVaultItem, updateVaultItem } from '../sync.js';
+import { deleteVaultItem, updateVaultItem, createNote } from '../sync.js';
 // v1.10.0: Folder ops — rename/archive/delete/move dengan guards anti-crash.
 import { renameFolder, archiveFolder, deleteFolder, moveFolder, cleanupOrphanFolders, findOrphanFolders } from '../lib/folder-ops.js';
 import {
   buildTree, isGroupItem, getParentId, setParentId,
-  isPinned, setPinned
+  isPinned, setPinned, createGroup
 } from '../lib/vault-tree.js';
 
 let _batchMode = false;
@@ -626,10 +626,13 @@ function openItemMenuSheet(itemId) {
     const body = sheet.querySelector('#itemMenuBody');
     body.innerHTML = `
       <h3 style="margin-bottom:8px;font-size:15px">${typeLabel} · ${title}</h3>
+      <button class="sheet-btn" data-action="edit">✏️ Edit Judul & Isi</button>
       <button class="sheet-btn" data-action="pin">${pinned ? '📌 Lepas Sematan' : '📌 Sematkan ke Atas'}</button>
       <button class="sheet-btn" data-action="move">📂 Pindahkan ke Folder...</button>
       <button class="sheet-btn" data-action="copy">📋 Salin Teks</button>
       <button class="sheet-btn" data-action="fav">${item.favorite ? '⭐ Lepas Favorit' : '⭐ Tandai Favorit'}</button>
+      <button class="sheet-btn" data-action="archive">${item.archived ? '📤 Keluarkan dari Arsip' : '📦 Arsipkan'}</button>
+      ${item.type === 'screenshot' || item.type === 'document' ? '<button class="sheet-btn" data-action="annot">📝 Edit Catatan Anotasi</button>' : ''}
       <button class="sheet-btn cancel" data-action="delete" style="color:#ef4444">🗑️ Hapus</button>
       <button class="sheet-btn cancel" data-action="close">✕ Tutup</button>
     `;
@@ -644,6 +647,9 @@ function openItemMenuSheet(itemId) {
           else if (action === 'move') openMoveToFolderSheet(itemId);
           else if (action === 'copy') copyItem(itemId);
           else if (action === 'fav') toggleFavorite(itemId);
+          else if (action === 'archive') toggleArchiveItem(itemId);
+          else if (action === 'edit') openEditItemSheet(itemId);
+          else if (action === 'annot') openEditAnnotationSheet(itemId);
           else if (action === 'delete') confirmDelete(itemId);
         }, 100);
       });
@@ -1125,4 +1131,176 @@ function showToast(msg) {
   t.textContent = msg;
   t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), 2000);
+}
+
+// ============================================================
+// v1.10.3 TIER 1: Fitur baru — Arsip, Edit, Buat Folder, Edit Anotasi
+// ============================================================
+
+// v1.10.3: Toggle archive item (single item, bukan folder)
+async function toggleArchiveItem(itemId) {
+  try {
+    const items = await dbGetAllVaultItems();
+    const item = items.find(i => i.id === itemId);
+    if (!item) return;
+    const newVal = !item.archived;
+    // Update lokal instan
+    item.archived = newVal;
+    await dbPutVaultItem(item);
+    // Update cloud
+    await updateVaultItem(window.__rfUser, itemId, { archived: newVal });
+    showToast(newVal ? '📦 Diarsipkan' : '📤 Dikeluarkan dari arsip');
+    renderList();
+  } catch (e) {
+    console.error('[RecallFox] toggleArchiveItem error:', e);
+    showToast('Gagal: ' + e.message);
+  }
+}
+
+// v1.10.3: Edit item (judul + isi + tag) — bottom sheet dengan textarea
+function openEditItemSheet(itemId) {
+  const sheet = document.createElement('div');
+  sheet.className = 'bottom-sheet';
+  sheet.innerHTML = `
+    <div class="sheet-backdrop"></div>
+    <div class="sheet-content" style="max-height:80vh;overflow-y:auto">
+      <div class="sheet-handle"></div>
+      <div id="editItemBody">Memuat...</div>
+    </div>
+  `;
+  document.body.appendChild(sheet);
+  requestAnimationFrame(() => sheet.classList.add('open'));
+  const close = () => {
+    sheet.classList.remove('open');
+    setTimeout(() => sheet.remove(), 250);
+  };
+  sheet.querySelector('.sheet-backdrop').addEventListener('click', close);
+
+  (async () => {
+    const items = await dbGetAllVaultItems();
+    const item = items.find(i => i.id === itemId);
+    if (!item) { close(); return; }
+
+    const body = sheet.querySelector('#editItemBody');
+    const tagsStr = Array.isArray(item.tags) ? item.tags.join(', ') : (item.tags || '');
+    body.innerHTML = `
+      <h3 style="margin-bottom:12px;font-size:15px">✏️ Edit Item</h3>
+      <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;font-weight:600">Judul</label>
+      <input id="editTitle" type="text" value="${escapeHtml(item.title || '')}" placeholder="Judul..."
+        style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:14px;box-sizing:border-box;margin-bottom:10px">
+      <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;font-weight:600">Isi</label>
+      <textarea id="editBody" rows="8" placeholder="Isi prompt/konteks..."
+        style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;box-sizing:border-box;margin-bottom:10px;font-family:monospace;resize:vertical">${escapeHtml(item.body || '')}</textarea>
+      <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;font-weight:600">Tag (pisahkan dengan koma)</label>
+      <input id="editTags" type="text" value="${escapeHtml(tagsStr)}" placeholder="tag1, tag2..."
+        style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:14px;box-sizing:border-box;margin-bottom:14px">
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost" id="editCancel" style="flex:1;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">Batal</button>
+        <button class="btn btn-primary" id="editSave" style="flex:1;padding:10px;background:var(--primary);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">Simpan</button>
+      </div>
+    `;
+
+    body.querySelector('#editCancel').addEventListener('click', close);
+    body.querySelector('#editSave').addEventListener('click', async () => {
+      const title = body.querySelector('#editTitle').value.trim();
+      const bodyText = body.querySelector('#editBody').value;
+      const tagsText = body.querySelector('#editTags').value.trim();
+      const tags = tagsText ? tagsText.split(',').map(t => t.trim()).filter(Boolean) : [];
+      close();
+      try {
+        // Update lokal instan
+        item.title = title || 'Untitled';
+        item.body = bodyText;
+        item.tags = tags;
+        await dbPutVaultItem(item);
+        // Update cloud
+        await updateVaultItem(window.__rfUser, itemId, { title: item.title, body: item.body, tags: item.tags });
+        showToast('✓ Tersimpan');
+        renderList();
+      } catch (e) {
+        showToast('Gagal simpan: ' + e.message);
+      }
+    });
+  })();
+}
+
+// v1.10.3: Edit annotation note untuk screenshot/document
+function openEditAnnotationSheet(itemId) {
+  const sheet = document.createElement('div');
+  sheet.className = 'bottom-sheet';
+  sheet.innerHTML = `
+    <div class="sheet-backdrop"></div>
+    <div class="sheet-content">
+      <div class="sheet-handle"></div>
+      <div id="annotBody">Memuat...</div>
+    </div>
+  `;
+  document.body.appendChild(sheet);
+  requestAnimationFrame(() => sheet.classList.add('open'));
+  const close = () => {
+    sheet.classList.remove('open');
+    setTimeout(() => sheet.remove(), 250);
+  };
+  sheet.querySelector('.sheet-backdrop').addEventListener('click', close);
+
+  (async () => {
+    const items = await dbGetAllVaultItems();
+    const item = items.find(i => i.id === itemId);
+    if (!item) { close(); return; }
+    const existingNote = item.source?.annotationNote || item.annotation_note || '';
+
+    const body = sheet.querySelector('#annotBody');
+    body.innerHTML = `
+      <h3 style="margin-bottom:12px;font-size:15px">📝 Edit Catatan Anotasi</h3>
+      <textarea id="annotText" rows="5" placeholder="Catatan tentang screenshot/dokumen ini..."
+        style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;box-sizing:border-box;margin-bottom:14px;resize:vertical">${escapeHtml(existingNote)}</textarea>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-ghost" id="annotCancel" style="flex:1;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">Batal</button>
+        <button class="btn btn-primary" id="annotSave" style="flex:1;padding:10px;background:var(--primary);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">Simpan</button>
+      </div>
+    `;
+
+    body.querySelector('#annotCancel').addEventListener('click', close);
+    body.querySelector('#annotSave').addEventListener('click', async () => {
+      const note = body.querySelector('#annotText').value.trim();
+      close();
+      try {
+        if (!item.source) item.source = {};
+        item.source.annotationNote = note;
+        await dbPutVaultItem(item);
+        await updateVaultItem(window.__rfUser, itemId, { source: item.source });
+        showToast('✓ Catatan disimpan');
+        renderList();
+      } catch (e) {
+        showToast('Gagal: ' + e.message);
+      }
+    });
+  })();
+}
+
+// v1.10.3: Buat folder baru — dipanggil dari FAB menu atau vault header
+export async function handleCreateFolder() {
+  const name = prompt('Nama folder baru:');
+  if (!name || !name.trim()) return;
+  // Type folder = filter type yang aktif (atau 'prompt' default)
+  const folderType = (_filterType && _filterType !== 'all') ? _filterType : 'prompt';
+  const folder = createGroup(name.trim(), folderType);
+  try {
+    // Save ke IndexedDB + cloud (pola sama dengan addon handleAddGroup)
+    await dbPutVaultItem(folder);
+    await updateVaultItem(window.__rfUser, folder.id, {
+      title: folder.title,
+      type: folder.type,
+      tags: folder.tags,
+      source: folder.source
+    });
+    // Auto-expand folder baru
+    _expandedFolderIds.add(folder.id);
+    showToast('✓ Folder "' + name.trim() + '" dibuat');
+    renderList();
+  } catch (e) {
+    // Fallback: coba createNote (yang sudah ada di sync.js)
+    console.error('[RecallFox] createFolder error:', e);
+    showToast('Gagal buat folder: ' + e.message);
+  }
 }

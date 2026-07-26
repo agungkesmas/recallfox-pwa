@@ -19,6 +19,7 @@ import { renderMedia, startCaptureFlow, startDocumentFlow } from './views/media.
 import { renderNotes, openNoteEditor } from './views/notes.js';
 import { renderSettings } from './views/settings.js';
 import { renderVault, isUserTogglingFolders } from './views/vault.js';
+import { handleCreateFolder } from './views/vault.js';
 import { showSharePreviewModal } from './share-target.js';  // v1.9.0
 
 let _currentView = 'media';
@@ -255,6 +256,7 @@ function openFabMenu() {
       <button class="sheet-btn" data-action="document">📄 Scan Dokumen</button>
       <button class="sheet-btn" data-action="paste">📋 Paste dari Clipboard</button>
       <button class="sheet-btn" data-action="note">📝 Catatan Baru</button>
+      <button class="sheet-btn" data-action="folder">📁 Folder Baru</button>
       <button class="sheet-btn cancel" data-action="cancel">Batal</button>
     </div>
   `;
@@ -271,6 +273,7 @@ function openFabMenu() {
     else if (action === 'document') startDocumentFlow();
     else if (action === 'paste') startCaptureFlow('paste');
     else if (action === 'note') { navigateTo('notes'); setTimeout(openNoteEditor, 100); }
+    else if (action === 'folder') { navigateTo('vault'); setTimeout(() => handleCreateFolder(), 100); }
   });
 }
 
