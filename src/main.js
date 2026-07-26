@@ -1,9 +1,7 @@
 // src/main.js — Entry point, router, init Supabase + realtime
-// v1.2.0: Realtime WS tidak broadcast (infrastruktur Supabase bermasalah).
-//         Fallback ke polling 10 detik — pasti jalan, tidak bergantung Realtime.
-// v1.1.0: Fix shell render bug — views render to #appMain, bottom nav persists.
-// v1.1.0: FAB unified — 1 button for both media & catatan (minim klik).
-// v1.8.7: Android Share Sheet — handle /share-target route dari PWA manifest.
+// v1.9.0: Share target — SIMPLIFIED. Jangan proses share di init().
+//   Hanya simpan ke sessionStorage, render app normal, lalu tampilkan
+//   preview modal SETELAH app fully rendered. User konfirmasi → simpan.
 
 import './styles/base.css';
 import './styles/components.css';
@@ -15,81 +13,76 @@ import { renderLogin } from './views/login.js';
 import { renderMedia, startCaptureFlow, startDocumentFlow } from './views/media.js';
 import { renderNotes, openNoteEditor } from './views/notes.js';
 import { renderSettings } from './views/settings.js';
-import { renderVault } from './views/vault.js';  // v1.7.0: Vault teks (prompt, context, snapshot, link, bundle)
-import { handleShareTarget, processPendingShare } from './share-target.js';  // v1.8.7
+import { renderVault } from './views/vault.js';
+import { showSharePreviewModal } from './share-target.js';  // v1.9.0
 
 let _currentView = 'media';
 let _realtimeBound = false;
 let _pollTimer = null;
 let _retryTimer = null;
 let _lastPullAt = 0;
-const POLL_INTERVAL_MS = 10000; // 10 detik
-const RETRY_INTERVAL_MS = 30000; // 30 detik — retry sync queue yang gagal
+const POLL_INTERVAL_MS = 10000;
+const RETRY_INTERVAL_MS = 30000;
 
 async function init() {
-  // v1.8.9: Cek share-target route SEBELUM render app.
-  // Kalau share-target, proses share dulu, LALU render app normal.
+  // v1.9.0: Cek share-target route — HANYA simpan ke sessionStorage.
+  // JANGAN proses apapun di sini. App render normal dulu.
+  // Preview modal ditampilkan SETELAH showApp selesai.
   const currentUrl = new URL(window.location.href);
   const isShareTarget = currentUrl.pathname.endsWith('/share-target') ||
                         currentUrl.pathname.endsWith('/share-target/');
 
-  console.log('[RecallFox] init called. isShareTarget:', isShareTarget, 'pathname:', currentUrl.pathname);
+  if (isShareTarget) {
+    // Simpan share data ke sessionStorage — akan diproses setelah app ready
+    const params = currentUrl.searchParams;
+    const shareData = {
+      title: params.get('title') || '',
+      text: params.get('text') || '',
+      url: params.get('url') || ''
+    };
+    sessionStorage.setItem('rf_pending_share', JSON.stringify(shareData));
+    console.log('[RecallFox] Share target detected — saved to sessionStorage:', shareData);
 
+    // Clean URL IMMEDIATELY — hapus /share-target supaya SW navigation tidak loop
+    try {
+      window.history.replaceState({}, document.title, new URL('./', currentUrl).href);
+    } catch (e) {}
+  }
+
+  // === RENDER APP NORMAL — tidak peduli share-target atau tidak ===
   const session = await getSession();
   if (session?.user) {
-    // v1.8.9: Kalau share-target, proses share DULU sebelum showApp
-    // supaya navigateTo('vault') tidak bentrok dengan render media.
-    if (isShareTarget) {
-      console.log('[RecallFox] Share target detected — processing share before app render');
-      try {
-        await handleShareTarget(currentUrl, null); // null = jangan navigate yet
-      } catch (e) {
-        console.error('[RecallFox] Share target error:', e.message);
-      }
-      // Clean URL — hapus /share-target dari address bar
-      try {
-        window.history.replaceState({}, document.title, new URL('./', currentUrl).href);
-      } catch (e) {}
-    }
-
-    // Render app normal
     await showApp(session.user);
-
-    // v1.8.9: Kalau tadi share-target, navigate ke vault SETELAH app ready + pull selesai
-    if (isShareTarget) {
-      // Tunggu pullFromCloud selesai supaya data share item sudah ada di IndexedDB
+    // v1.9.0: Setelah app fully rendered, cek apakah ada pending share
+    const pending = sessionStorage.getItem('rf_pending_share');
+    if (pending) {
+      sessionStorage.removeItem('rf_pending_share');
       try {
-        await pullFromCloud(session.user);
+        const data = JSON.parse(pending);
+        // Tampilkan preview modal — user konfirmasi sebelum simpan
+        setTimeout(() => showSharePreviewModal(data, session.user), 500);
       } catch (e) {
-        console.warn('[RecallFox] Pull after share failed (non-critical):', e.message);
+        console.error('[RecallFox] Pending share parse error:', e.message);
       }
-      // Sekarang navigate ke vault
-      navigateTo('vault');
-      console.log('[RecallFox] Navigated to vault after share');
     }
   } else {
-    // Belum login
     showLogin();
-    if (isShareTarget) {
-      // Simpan pending share, proses setelah login
-      console.log('[RecallFox] Share target but not logged in — saving pending share');
-      try {
-        await handleShareTarget(currentUrl, null);
-      } catch (e) {
-        console.error('[RecallFox] Share target (not logged in) error:', e.message);
-      }
-      // Clean URL
-      try {
-        window.history.replaceState({}, document.title, new URL('./', currentUrl).href);
-      } catch (e) {}
-    }
+    // Kalau belum login + ada pending share, proses setelah login
+    // (processPendingShare di onAuthChange akan handle)
   }
 
   onAuthChange(async (user) => {
     if (user) {
       await showApp(user);
-      // v1.8.7: Proses pending share setelah login berhasil
-      await processPendingShare(navigateTo);
+      // v1.9.0: Cek pending share setelah login
+      const pending = sessionStorage.getItem('rf_pending_share');
+      if (pending) {
+        sessionStorage.removeItem('rf_pending_share');
+        try {
+          const data = JSON.parse(pending);
+          setTimeout(() => showSharePreviewModal(data, user), 500);
+        } catch (e) {}
+      }
     } else {
       stopPolling();
       stopRetryQueue();
@@ -100,7 +93,6 @@ async function init() {
   });
 
   window.addEventListener('online', async () => {
-    console.log('[RecallFox] Back online — processing sync queue');
     const session = await getSession();
     if (session?.user) {
       await processSyncQueue(session.user);
@@ -123,25 +115,18 @@ function showLogin() {
 
 async function showApp(user) {
   window.__rfUser = user;
-  // Render shell FIRST supaya UI langsung muncul (jangan tunggu pull)
   renderShell(user);
   navigateTo(_currentView);
 
-  // Background: pull + subscribe (jangan block UI)
   pullFromCloud(user).then(() => {
-    // Re-render setelah pull supaya data baru muncul
     navigateTo(_currentView);
     _lastPullAt = Date.now();
   }).catch(e => console.warn('[RecallFox] pull failed:', e.message));
 
   processSyncQueue(user).catch(e => console.warn('[RecallFox] queue failed:', e.message));
 
-  // v1.2.0: Realtime WS tidak broadcast (infrastruktur Supabase bermasalah).
-  // Tetap subscribe sebagai backup (kalau nanti Realtime di-fix di sisi server),
-  // tapi ANDALKAN polling 10 detik untuk sinkronisasi cross-device.
   if (!_realtimeBound) {
     subscribeRealtime(user, () => {
-      // Realtime event (kalau ada) → re-render current view
       if (_currentView === 'media' || _currentView === 'vault' || _currentView === 'notes') {
         navigateTo(_currentView);
       }
@@ -149,33 +134,18 @@ async function showApp(user) {
     _realtimeBound = true;
   }
 
-  // v1.2.0: Polling 10 detik — paling pasti jalan, tidak bergantung Realtime.
   startPolling(user);
-  // v1.6.0: Auto-retry sync queue 30 detik — anti-gagal save.
   startRetryQueue(user);
 }
 
 function startPolling(user) {
-  // Clear existing timer
   if (_pollTimer) clearInterval(_pollTimer);
-
   _pollTimer = setInterval(async () => {
-    if (!window.__rfUser) {
-      stopPolling();
-      return;
-    }
-    // v1.6.3: Skip polling kalau offline — supaya tidak spam error di console
-    // dan tidak boros battery (request gagal terus).
-    if (!navigator.onLine) {
-      console.log('[RecallFox] Polling: offline, skip');
-      return;
-    }
+    if (!window.__rfUser) { stopPolling(); return; }
+    if (!navigator.onLine) return;
     try {
-      // Cek apakah ada perubahan di cloud dengan compare max(updated_at)
-      // Kalau ada → pullFromCloud + re-render
       const { supabase, VAULT_TABLE, NOTES_TABLE } = await import('./supabase.js');
-      const since = new Date(_lastPullAt - 5000).toISOString(); // 5s buffer
-
+      const since = new Date(_lastPullAt - 5000).toISOString();
       const [vaultRes, notesRes] = await Promise.all([
         supabase.from(VAULT_TABLE).select('updated_at')
           .eq('user_id', user.id).gt('updated_at', since)
@@ -184,66 +154,31 @@ function startPolling(user) {
           .eq('user_id', user.id).gt('updated_at', since)
           .order('updated_at', { ascending: false }).limit(1)
       ]);
-
-      const vaultChanged = vaultRes.data && vaultRes.data.length > 0;
-      const notesChanged = notesRes.data && notesRes.data.length > 0;
-
-      if (vaultChanged || notesChanged) {
-        console.log('[RecallFox] Polling: cloud changed, pulling...', { vaultChanged, notesChanged });
+      if ((vaultRes.data?.length > 0) || (notesRes.data?.length > 0)) {
         await pullFromCloud(user);
         _lastPullAt = Date.now();
         if (_currentView === 'media' || _currentView === 'vault' || _currentView === 'notes') {
           navigateTo(_currentView);
         }
       }
-    } catch (e) {
-      console.warn('[RecallFox] Polling error:', e.message);
-    }
+    } catch (e) {}
   }, POLL_INTERVAL_MS);
-
-  console.log(`[RecallFox] Polling started (every ${POLL_INTERVAL_MS / 1000}s)`);
 }
 
 function stopPolling() {
-  if (_pollTimer) {
-    clearInterval(_pollTimer);
-    _pollTimer = null;
-    console.log('[RecallFox] Polling stopped');
-  }
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
 }
 
-// v1.6.0: Auto-retry sync queue setiap 30 detik — anti-gagal save.
-// Sebelumnya: queue hanya diproses saat init atau saat event 'online'.
-//   → kalau cloud timeout saat save, user lihat "Tersimpan lokal — retry otomatis"
-//   tapi retry tidak pernah terjadi sampai user refresh page.
-// Sekarang: setInterval 30s proses queue terus-menerus. Kalau ada item di queue
-//   (upload screenshot/doc/note yang gagal), akan di-retry otomatis.
 function startRetryQueue(user) {
   if (_retryTimer) clearInterval(_retryTimer);
   _retryTimer = setInterval(async () => {
-    if (!window.__rfUser) {
-      stopRetryQueue();
-      return;
-    }
-    // v1.6.3: Skip retry queue kalau offline — supaya tidak spam error
-    if (!navigator.onLine) {
-      return;
-    }
-    try {
-      await processSyncQueue(user);
-    } catch (e) {
-      // Silent fail — tidak perlu console.warn (queue akan retry lagi 30s lagi)
-    }
+    if (!window.__rfUser) { stopRetryQueue(); return; }
+    try { await processSyncQueue(user); } catch (e) {}
   }, RETRY_INTERVAL_MS);
-  console.log(`[RecallFox] Retry queue started (every ${RETRY_INTERVAL_MS / 1000}s)`);
 }
 
 function stopRetryQueue() {
-  if (_retryTimer) {
-    clearInterval(_retryTimer);
-    _retryTimer = null;
-    console.log('[RecallFox] Retry queue stopped');
-  }
+  if (_retryTimer) { clearInterval(_retryTimer); _retryTimer = null; }
 }
 
 function refreshCurrentView() {
@@ -281,8 +216,6 @@ function renderShell(user) {
 }
 
 function openFabMenu() {
-  // v1.3.0: FAB unified — 1 tap → bottom sheet dengan 5 opsi (Foto/Galeri/Paste/Dokumen/Catatan)
-  // Minim klik: user bisa akses semua dari 1 tombol.
   const sheet = document.createElement('div');
   sheet.className = 'bottom-sheet';
   sheet.innerHTML = `
@@ -290,55 +223,26 @@ function openFabMenu() {
     <div class="sheet-content">
       <div class="sheet-handle"></div>
       <h3>Tambah Baru</h3>
-      <button class="sheet-btn sheet-btn-doc" data-action="document">
-        <span class="sheet-ic">📄</span>
-        <div><div class="sheet-t">Scan Dokumen</div><div class="sheet-s">Foto dokumen, auto-rapihin + filter</div></div>
-      </button>
-      <button class="sheet-btn sheet-btn-primary" data-action="camera">
-        <span class="sheet-ic">📷</span>
-        <div><div class="sheet-t">Foto Kamera</div><div class="sheet-s">Buka kamera HP</div></div>
-      </button>
-      <button class="sheet-btn" data-action="gallery">
-        <span class="sheet-ic">🖼️</span>
-        <div><div class="sheet-t">Dari Galeri</div><div class="sheet-s">Pilih foto dari rol kamera</div></div>
-      </button>
-      <button class="sheet-btn" data-action="paste">
-        <span class="sheet-ic">📋</span>
-        <div><div class="sheet-t">Paste Gambar</div><div class="sheet-s">Dari clipboard HP</div></div>
-      </button>
-      <button class="sheet-btn sheet-btn-note" data-action="note">
-        <span class="sheet-ic">📝</span>
-        <div><div class="sheet-t">Catatan Baru</div><div class="sheet-s">Tulis catatan</div></div>
-      </button>
-      <button class="sheet-btn sheet-cancel" data-action="cancel">Batal</button>
+      <button class="sheet-btn" data-action="camera">📷 Ambil Foto</button>
+      <button class="sheet-btn" data-action="gallery">🖼️ Dari Galeri</button>
+      <button class="sheet-btn" data-action="document">📄 Scan Dokumen</button>
+      <button class="sheet-btn" data-action="paste">📋 Paste dari Clipboard</button>
+      <button class="sheet-btn" data-action="note">📝 Catatan Baru</button>
+      <button class="sheet-btn cancel" data-action="cancel">Batal</button>
     </div>
   `;
   document.body.appendChild(sheet);
-  setTimeout(() => sheet.classList.add('open'), 10);
-
-  const close = () => {
-    sheet.classList.remove('open');
-    setTimeout(() => { if (sheet.parentNode) document.body.removeChild(sheet); }, 200);
-  };
-
-  sheet.addEventListener('click', async (e) => {
-    const btn = e.target.closest('button');
-    if (!btn) {
-      if (e.target.classList.contains('sheet-backdrop')) close();
-      return;
-    }
-    const action = btn.dataset.action;
-    if (action === 'cancel') { close(); return; }
-    close();
-    if (action === 'note') {
-      openNoteEditor(null, refreshCurrentView);
-    } else if (action === 'document') {
-      // v1.3.0: Document flow (CamScanner-like)
-      startDocumentFlow('camera', refreshCurrentView);
-    } else {
-      // Media capture flow
-      startCaptureFlow(action, refreshCurrentView);
-    }
+  sheet.addEventListener('click', (e) => {
+    const btn = e.target.closest('.sheet-btn');
+    const backdrop = e.target.classList.contains('sheet-backdrop');
+    if (!btn && !backdrop) return;
+    const action = btn?.dataset.action || 'cancel';
+    sheet.remove();
+    if (action === 'camera') startCaptureFlow('camera');
+    else if (action === 'gallery') startCaptureFlow('gallery');
+    else if (action === 'document') startDocumentFlow();
+    else if (action === 'paste') startCaptureFlow('paste');
+    else if (action === 'note') { navigateTo('notes'); setTimeout(openNoteEditor, 100); }
   });
 }
 
@@ -348,12 +252,11 @@ function navigateTo(view) {
   const user = window.__rfUser;
   if (!user) return;
   if (view === 'media') renderMedia(user, refreshCurrentView);
-  else if (view === 'vault') renderVault(user, refreshCurrentView);  // v1.7.0
+  else if (view === 'vault') renderVault(user, refreshCurrentView);
   else if (view === 'notes') renderNotes(user, refreshCurrentView);
   else if (view === 'settings') renderSettings(user, () => showLogin());
 }
 
-// Expose for views to call
 window.__rfNavigate = navigateTo;
 window.__rfRefreshCurrent = refreshCurrentView;
 

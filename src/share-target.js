@@ -1,58 +1,59 @@
-// src/share-target.js — Handle incoming share dari Android Share Sheet
-// v1.8.7: RecallFox PWA muncul di menu Share HP. User share link/teks dari app
-// mana pun → langsung masuk vault sebagai prompt/context/link item.
+// src/share-target.js — v1.9.0: Preview modal untuk share target
+// User share link → PWA terbuka → app render normal → preview modal muncul
+// User lihat preview → klik "Simpan" → item disimpan ke Supabase → navigate vault
+// User klik "Batal" → tidak simpan, tetap di app normal
 //
-// Flow:
-//   1. User share dari app lain → Android buka https://recallfox-pwa.vercel.app/share-target?title=...&text=...&url=...
-//   2. main.js init() cek URL → kalau ada /share-target, panggil handleShareTarget()
-//   3. handleShareTarget() parse query params → tentukan tipe item (link/text) → simpan via sync.js
-//   4. Redirect ke vault view + toast konfirmasi
-//
-// Tipe item yang dibuat berdasarkan share content:
-//   - Kalau ada URL → type='link' (simpan linkUrl + title + text sebagai body)
-//   - Kalau hanya text panjang → type='context' (simpan body=text, title dari first line)
-//   - Kalau text pendek (< 100 chars) → type='prompt' (prompt teks untuk AI)
-//
-// Auth: kalau user belum login → redirect ke login dulu, setelah login baru proses share.
+// FLOW:
+// 1. Android Share Sheet → buka /share-target?title=...&text=...&url=...
+// 2. main.js init() → simpan ke sessionStorage → clean URL → render app normal
+// 3. Setelah showApp() selesai → showSharePreviewModal(data, user)
+// 4. Modal muncul dengan preview (URL/title/text)
+// 5. User klik "Simpan ke Vault" → createShareItem → navigate vault → toast
+// 6. User klik "Batal" → modal tutup → tetap di app
 
 import { getSession } from './auth.js';
-import { updateVaultItem } from './sync.js';
-import { dbGetAllVaultItems } from './db.js';
 
-// Lazy import createVaultItem-style — pakai supabase langsung karena sync.js
-// tidak expose generic createItem (hanya createScreenshotItem/createDocumentItem/createNote).
-// Untuk share target, kita buat item type='link'/'context'/'prompt' langsung via supabase.
 async function createShareItem(user, payload) {
   const { supabase, VAULT_TABLE } = await import('./supabase.js');
   const itemId = 'sh_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
   const now = new Date().toISOString();
 
-  // Determine type based on content
   let type = 'prompt';
   let title = payload.title || '';
   let body = payload.text || '';
   let linkUrl = null;
 
-  if (payload.url) {
+  // v1.8.8: Brave browser kadang kirim URL di text field
+  let cleanUrl = payload.url || '';
+  let cleanText = body;
+  if (!cleanUrl && body) {
+    try {
+      const testUrl = new URL(body.trim());
+      if (testUrl.protocol === 'http:' || testUrl.protocol === 'https:') {
+        cleanUrl = body.trim();
+        cleanText = '';
+      }
+    } catch (e) {}
+  }
+
+  if (cleanUrl) {
     type = 'link';
-    linkUrl = payload.url;
-    title = title || payload.url;
-    body = payload.text || payload.url;
-  } else if (body && body.length > 100) {
+    linkUrl = cleanUrl;
+    title = title || cleanUrl;
+    body = cleanText || cleanUrl;
+  } else if (cleanText && cleanText.length > 100) {
     type = 'context';
     if (!title) {
-      // Title = first line atau first 60 chars
-      const firstLine = body.split('\n')[0];
+      const firstLine = cleanText.split('\n')[0];
       title = firstLine.length > 60 ? firstLine.slice(0, 60) + '...' : firstLine;
     }
-  } else if (body) {
+  } else if (cleanText) {
     type = 'prompt';
-    if (!title) title = body.slice(0, 60);
-  } else if (payload.title) {
-    // Hanya title, no text/url → treat as prompt
+    if (!title) title = cleanText.slice(0, 60);
+  } else if (title) {
     type = 'prompt';
-    body = payload.title;
-    title = payload.title.slice(0, 60);
+    body = title;
+    title = title.slice(0, 60);
   }
 
   const row = {
@@ -63,11 +64,7 @@ async function createShareItem(user, payload) {
     body: body || '',
     tags: ['shared'],
     category: null,
-    source: {
-      capturedAt: now,
-      device: 'pwa-share',
-      shareSource: 'android-share-sheet'
-    },
+    source: { capturedAt: now, device: 'pwa-share', shareSource: 'android-share-sheet' },
     link_url: type === 'link' ? linkUrl : null,
     link_title: type === 'link' ? (title || linkUrl) : null,
     favorite: false,
@@ -77,7 +74,7 @@ async function createShareItem(user, payload) {
     created_at: now,
     updated_at: now,
     deleted_at: null,
-    device_id: 'pwa-share-' + (navigator.userAgent.slice(0, 20) || 'unknown')
+    device_id: 'pwa-share'
   };
 
   console.log('[RecallFox/Share] Creating item:', itemId, 'type:', type, 'title:', title);
@@ -85,16 +82,13 @@ async function createShareItem(user, payload) {
   try {
     const { error } = await supabase.from(VAULT_TABLE).upsert(row);
     if (error) {
-      console.error('[RecallFox/Share] Supabase upsert error:', error.message);
+      console.error('[RecallFox/Share] Supabase error:', error.message);
       return { ok: false, error: error.message };
     }
-    // Cache ke IndexedDB supaya langsung tampil di vault view
     try {
       const { dbPutVaultItem } = await import('./db.js');
       await dbPutVaultItem(row);
-    } catch (e) {
-      console.warn('[RecallFox/Share] IndexedDB cache failed (non-critical):', e.message);
-    }
+    } catch (e) {}
     return { ok: true, item: row };
   } catch (e) {
     console.error('[RecallFox/Share] Exception:', e.message);
@@ -103,105 +97,134 @@ async function createShareItem(user, payload) {
 }
 
 /**
- * Handle share target URL.
- * Dipanggil dari main.js init() kalau URL path = '/share-target'.
- *
- * @param {URL} url — current URL (dengan query params)
- * @param {function} navigateTo — router function untuk pindah view
- * @returns {Promise<{handled: boolean}>}
+ * v1.9.0: Tampilkan preview modal untuk share data.
+ * User lihat preview → klik Simpan → item dibuat → navigate vault.
+ * User klik Batal → modal tutup.
  */
-export async function handleShareTarget(url, navigateTo) {
-  // v1.8.8: Log lebih detail untuk debugging
-  console.log('[RecallFox/Share] handleShareTarget called. pathname:', url.pathname);
-  if (!url.pathname.endsWith('/share-target') && !url.pathname.endsWith('/share-target/')) {
-    console.log('[RecallFox/Share] Not a share-target URL, skip');
-    return { handled: false };
-  }
+export async function showSharePreviewModal(data, user) {
+  console.log('[RecallFox/Share] Showing preview modal:', data);
 
-  const params = url.searchParams;
-  const title = params.get('title') || '';
-  const text = params.get('text') || '';
-  const urlParam = params.get('url') || '';
+  // Extract URL dari text kalau tidak ada url field (Brave browser)
+  let url = data.url || '';
+  let text = data.text || '';
+  let title = data.title || '';
 
-  // v1.8.8: Brave browser kadang kirim URL di 'text' field, bukan 'url' field.
-  // Cek kalau text berisi URL, extract sebagai url.
-  let cleanUrl = urlParam ? urlParam.split('#')[0] : '';
-  let cleanText = text;
-  if (!cleanUrl && text) {
-    // Cek apakah text adalah URL
+  if (!url && text) {
     try {
       const testUrl = new URL(text.trim());
       if (testUrl.protocol === 'http:' || testUrl.protocol === 'https:') {
-        cleanUrl = text.trim();
-        cleanText = '';
-        console.log('[RecallFox/Share] URL found in text field, extracted:', cleanUrl);
+        url = text.trim();
+        text = '';
+      }
+    } catch (e) {}
+  }
+
+  // Tentukan tipe untuk label
+  let typeLabel = '💬 Prompt';
+  let typeIcon = '💬';
+  if (url) { typeLabel = '🔗 Link'; typeIcon = '🔗'; }
+  else if (text && text.length > 100) { typeLabel = '📋 Konteks'; typeIcon = '📋'; }
+
+  // Default title dari URL kalau kosong
+  if (!title && url) {
+    try { title = new URL(url).hostname; } catch (e) { title = url; }
+  }
+  if (!title && text) title = text.slice(0, 60);
+
+  // Buat modal
+  const modal = document.createElement('div');
+  modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px;animation:fadeIn .2s';
+
+  // Preview content
+  let previewHtml = '';
+  if (url) {
+    // URL preview — tampilkan sebagai link card
+    let hostname = '';
+    try { hostname = new URL(url).hostname; } catch (e) { hostname = url; }
+    previewHtml = `
+      <div style="background:#f5f5f4;border-radius:8px;padding:12px;margin-bottom:10px">
+        <div style="font-size:11px;color:#a8a29e;margin-bottom:4px">${typeIcon} ${typeLabel}</div>
+        <div style="font-size:14px;font-weight:600;color:#1c1917;margin-bottom:4px">${escapeHtml(title || hostname)}</div>
+        <div style="font-size:12px;color:#6366f1;word-break:break-all">${escapeHtml(url)}</div>
+        ${text ? `<div style="font-size:12px;color:#57534e;margin-top:8px">${escapeHtml(text)}</div>` : ''}
+      </div>`;
+  } else if (text) {
+    // Text preview
+    previewHtml = `
+      <div style="background:#f5f5f4;border-radius:8px;padding:12px;margin-bottom:10px">
+        <div style="font-size:11px;color:#a8a29e;margin-bottom:4px">${typeIcon} ${typeLabel}</div>
+        <div style="font-size:14px;font-weight:600;color:#1c1917;margin-bottom:4px">${escapeHtml(title || 'Teks')}</div>
+        <div style="font-size:12px;color:#57534e;white-space:pre-wrap;max-height:150px;overflow-y:auto">${escapeHtml(text)}</div>
+      </div>`;
+  } else if (title) {
+    previewHtml = `
+      <div style="background:#f5f5f4;border-radius:8px;padding:12px;margin-bottom:10px">
+        <div style="font-size:11px;color:#a8a29e;margin-bottom:4px">${typeIcon} ${typeLabel}</div>
+        <div style="font-size:14px;font-weight:600;color:#1c1917">${escapeHtml(title)}</div>
+      </div>`;
+  }
+
+  modal.innerHTML = `
+    <div style="background:#fff;border-radius:16px;max-width:380px;width:100%;padding:20px;box-shadow:0 20px 60px rgba(0,0,0,.3)">
+      <div style="font-size:16px;font-weight:700;margin-bottom:12px;color:#1c1917">📥 Bagikan ke RecallFox</div>
+      ${previewHtml}
+      <div style="display:flex;gap:8px;margin-top:14px">
+        <button id="shareCancel" style="flex:1;padding:10px;border:1px solid #e7e5e4;background:#fff;color:#57534e;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">Batal</button>
+        <button id="shareSave" style="flex:1;padding:10px;background:#6d3df5;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">Simpan ke Vault</button>
+      </div>
+    </div>
+  `;
+
+  document.body.appendChild(modal);
+
+  // Wire buttons
+  const cancelBtn = modal.querySelector('#shareCancel');
+  const saveBtn = modal.querySelector('#shareSave');
+
+  cancelBtn.addEventListener('click', () => {
+    modal.remove();
+    console.log('[RecallFox/Share] User cancelled share');
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    saveBtn.textContent = 'Menyimpan...';
+    saveBtn.disabled = true;
+    try {
+      const result = await createShareItem(user, { title, text, url });
+      if (result.ok) {
+        modal.remove();
+        const typeLabel2 = result.item.type === 'link' ? '🔗 Link' : (result.item.type === 'context' ? '📋 Konteks' : '💬 Prompt');
+        showToast('✓ Tersimpan ke ' + typeLabel2 + ': ' + (result.item.title || 'Shared item'));
+        // Navigate ke vault
+        if (window.__rfNavigate) window.__rfNavigate('vault');
+        console.log('[RecallFox/Share] Saved and navigated to vault');
+      } else {
+        showToast('✗ Gagal: ' + result.error, true);
+        saveBtn.textContent = 'Coba Lagi';
+        saveBtn.disabled = false;
       }
     } catch (e) {
-      // text bukan URL, biarkan
+      showToast('✗ Error: ' + e.message, true);
+      saveBtn.textContent = 'Coba Lagi';
+      saveBtn.disabled = false;
     }
-  }
+  });
 
-  console.log('[RecallFox/Share] Parsed:', { title, text: cleanText?.slice(0, 80), url: cleanUrl });
-
-  if (!title && !cleanText && !cleanUrl) {
-    console.warn('[RecallFox/Share] Empty share — no title/text/url');
-    // v1.8.8: Jangan return error, tetap navigate ke vault supaya user tidak stuck
-    if (navigateTo) navigateTo('vault');
-    showShareToast('Share kosong — tidak ada data diterima');
-    return { handled: true, error: 'empty_share' };
-  }
-
-  // Cek auth
-  const session = await getSession();
-  if (!session?.user) {
-    sessionStorage.setItem('rf_pending_share', JSON.stringify({ title, text: cleanText, url: cleanUrl }));
-    console.log('[RecallFox/Share] Not logged in — saved pending share, redirect to login');
-    showShareToast('Silakan login dulu — share akan diproses otomatis');
-    return { handled: true, pendingLogin: true };
-  }
-
-  // Sudah login → proses share
-  const result = await createShareItem(session.user, { title, text: cleanText, url: cleanUrl });
-  if (result.ok) {
-    console.log('[RecallFox/Share] Item saved:', result.item.id, 'type:', result.item.type);
-    // v1.8.9: navigateTo bisa null (dipanggil sebelum app render) —
-    // main.js yang handle navigate setelah app ready
-    if (navigateTo) navigateTo('vault');
-    const typeLabel = result.item.type === 'link' ? '🔗 Link' : (result.item.type === 'context' ? '📋 Konteks' : '💬 Prompt');
-    showShareToast('✓ Tersimpan ke ' + typeLabel + ': ' + (result.item.title || 'Shared item'));
-    return { handled: true, item: result.item };
-  } else {
-    console.error('[RecallFox/Share] Save failed:', result.error);
-    showShareToast('✗ Gagal simpan: ' + result.error, true);
-    return { handled: true, error: result.error };
-  }
+  // Click backdrop to cancel
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) {
+      modal.remove();
+    }
+  });
 }
 
-/**
- * Process pending share setelah user login.
- * Dipanggil dari main.js showApp() kalau ada pending share di sessionStorage.
- */
-export async function processPendingShare(navigateTo) {
-  const pending = sessionStorage.getItem('rf_pending_share');
-  if (!pending) return { handled: false };
-  sessionStorage.removeItem('rf_pending_share');
-  try {
-    const data = JSON.parse(pending);
-    const session = await getSession();
-    if (!session?.user) return { handled: false };
-    const result = await createShareItem(session.user, data);
-    if (result.ok) {
-      if (navigateTo) navigateTo('vault');
-      showShareToast('✓ Tersimpan ke vault: ' + (result.item.title || 'Shared item'));
-      return { handled: true, item: result.item };
-    }
-  } catch (e) {
-    console.error('[RecallFox/Share] processPendingShare error:', e.message);
-  }
-  return { handled: false };
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-function showShareToast(msg, isError = false) {
+function showToast(msg, isError = false) {
   let t = document.getElementById('rfToast');
   if (!t) {
     t = document.createElement('div');
@@ -214,4 +237,16 @@ function showShareToast(msg, isError = false) {
   t.style.color = '#fff';
   t.classList.add('show');
   setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// Legacy: handleShareTarget dan processPendingShare — tidak dipakai di v1.9.0
+// main.js sekarang pakai showSharePreviewModal langsung.
+// Tetap export supaya tidak break import lama.
+export async function handleShareTarget(url, navigateTo) {
+  console.warn('[RecallFox/Share] handleShareTarget deprecated — use showSharePreviewModal');
+  return { handled: false };
+}
+export async function processPendingShare(navigateTo) {
+  console.warn('[RecallFox/Share] processPendingShare deprecated — use showSharePreviewModal');
+  return { handled: false };
 }
