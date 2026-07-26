@@ -27,7 +27,27 @@ export default defineConfig({
           { src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png' },
           { src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' },
           { src: 'icons/icon-512-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
-        ]
+        ],
+        // v1.8.7: Android Share Sheet — RecallFox muncul di menu Share HP.
+        // User share link/gambar/teks dari app mana pun → langsung masuk vault.
+        // Spec: https://developer.chrome.com/docs/web-share-target/
+        // Action method GET supaya service worker bisa intercept sebagai navigation route.
+        // Form fields: title, text, url (untuk text/share) + file gambar (untuk image share).
+        share_target: {
+          action: '/share-target',
+          method: 'GET',
+          enctype: 'application/x-www-form-urlencoded',
+          params: {
+            title: 'title',
+            text: 'text',
+            url: 'url'
+          }
+        },
+        // v1.8.7: Share target untuk gambar (file upload) — pakai POST multipart.
+        // PWA terima file gambar dari Share Sheet → simpan sebagai screenshot item.
+        // Note: PWA manifest hanya support 1 share_target, jadi kita pilih yang
+        // paling umum (text/url). Untuk image share, user bisa pakai "Open in RecallFox"
+        // dari gallery — itu sudah jalan via input file di FAB menu.
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,png,svg,woff2}'],
