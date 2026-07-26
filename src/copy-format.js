@@ -14,7 +14,11 @@ export function escapeHtml(s) {
 export function buildScreenshotCaption(item, dataUrl, opts = {}) {
   if (!item) return { textPlain: '', textHtml: '' };
 
-  const pageTitle = item.source?.title || item.title || 'screenshot';
+  // v1.8.5: Item title (user-given name) = judul utama, source title = sumber
+  // Sebelumnya: pageTitle = source.title → "HP Capture" jadi judul, item.title tidak muncul
+  // Sekarang: "📸 Sajadah Cila — Screenshot (HP Capture)"
+  const itemTitle = item.title || 'Untitled';
+  const sourceTitle = item.source?.title || '';
   const pageUrl = item.source?.url || '';
   const capturedAt = item.source?.capturedAt || item.createdAt || new Date().toISOString();
   const modeRaw = item.screenshot_mode || item.screenshotMode || 'visible';
@@ -25,16 +29,17 @@ export function buildScreenshotCaption(item, dataUrl, opts = {}) {
   const dims = (item.screenshot_width || item.screenshotWidth || 0) + '×' + (item.screenshot_height || item.screenshotHeight || 0) + ' px';
   const annotationNote = item.annotation_note || item.annotationNote || item.source?.annotationNote || item.source?.annotation_note || '';
   const capturedDateStr = new Date(capturedAt).toLocaleString('id-ID', { dateStyle: 'full', timeStyle: 'short' });
-  // v1.8.1: Lokasi GPS dari capture (source.location) — kompatibel dengan addon.
   const loc = item.source?.location;
   const locStr = loc ? (loc.address || ((loc.lat?.toFixed(4) || '?') + ', ' + (loc.lng?.toFixed(4) || '?'))) : '';
 
   const index = opts.index;
+  const sourceSuffix = sourceTitle ? ' (' + sourceTitle + ')' : '';
   const titlePrefix = (typeof index === 'number' && index > 0)
     ? '📸 ' + index + '. '
-    : '📸 Screenshot — ';
+    : '📸 ';
+  const titleLine = itemTitle + ' — Screenshot' + sourceSuffix;
 
-  let textPlain = titlePrefix + pageTitle + '\n'
+  let textPlain = titlePrefix + titleLine + '\n'
     + (pageUrl ? 'Sumber: ' + pageUrl + '\n' : '')
     + 'Waktu: ' + capturedDateStr + '\n'
     + (locStr ? '📍 Lokasi: ' + locStr + '\n' : '')
@@ -46,7 +51,7 @@ export function buildScreenshotCaption(item, dataUrl, opts = {}) {
   if (dataUrl) {
     html += '<p style="margin:0 0 6px"><img src="' + dataUrl + '" alt="screenshot" style="max-width:100%;border-radius:8px;border:1px solid #e7e5e4"/></p>';
   }
-  html += '<p style="margin:8px 0 2px"><strong>' + titlePrefix + escapeHtml(pageTitle) + '</strong></p>';
+  html += '<p style="margin:8px 0 2px"><strong>' + titlePrefix + escapeHtml(titleLine) + '</strong></p>';
   if (pageUrl) {
     html += '<p style="margin:0 0 2px;color:#57534e">🔗 <a href="' + escapeHtml(pageUrl) + '">' + escapeHtml(pageUrl) + '</a></p>';
   }
