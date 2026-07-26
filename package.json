@@ -1,6 +1,6 @@
 {
   "name": "recallfox-pwa",
-  "version": "1.9.4",
+  "version": "1.9.5",
   "description": "RecallFox PWA — cross-device media + notes + document scan sync via Supabase",
   "type": "module",
   "scripts": {

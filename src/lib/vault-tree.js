@@ -95,12 +95,19 @@ export function buildTree(items, expandedIds, categoryFilter, showGroups, sortMo
   const allByParent = new Map();
   const topLevel = [];
 
+  // v1.9.5 FIX: Build set of all item IDs untuk cek orphan children.
+  // Item dengan parentId ke folder yang TIDAK ADA di items array = orphan.
+  // Orphan children harus tampil sebagai top-level (jangan hilangkan).
+  const allIds = new Set(items.map(it => it.id));
+
   for (const it of items) {
     const pid = getParentId(it);
-    if (pid) {
+    if (pid && allIds.has(pid)) {
+      // Parent exists — item masuk ke parent map
       if (!allByParent.has(pid)) allByParent.set(pid, []);
       allByParent.get(pid).push(it);
     } else {
+      // No parent OR parent doesn't exist (orphan) → top-level
       topLevel.push(it);
     }
   }
