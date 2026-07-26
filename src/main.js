@@ -259,6 +259,7 @@ function openFabMenu() {
     </div>
   `;
   document.body.appendChild(sheet);
+  setTimeout(() => sheet.classList.add('open'), 10);
   sheet.addEventListener('click', (e) => {
     const btn = e.target.closest('.sheet-btn');
     const backdrop = e.target.classList.contains('sheet-backdrop');
