@@ -58,8 +58,14 @@ async function refreshList() {
   if (!grid) return;
   try {
     // v1.3.0: Tampilkan screenshot DAN document
+    // v1.8.6 FIX: Exclude isGroup items (folders) — folders are type=screenshot/document
+    // with source.isGroup=true. They appear as folder containers in Vault tab,
+    // NOT as individual media items. Clicking them in Media tab triggered
+    // "Gagal memuat gambar: file_not_found_in_cloud" because folders don't
+    // have real image files in Storage.
     const items = (await dbGetAllVaultItems()).filter(i =>
-      (i.type === 'screenshot' || i.type === 'document') && !i.archived
+      (i.type === 'screenshot' || i.type === 'document') && !i.archived &&
+      !(i.source?.isGroup)  // v1.8.6: skip folder/group items
     );
     items.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
     if (items.length === 0) {
@@ -135,7 +141,8 @@ function updateBatchUI() {
 }
 
 async function openItemDetail(id) {
-  const allItems = (await dbGetAllVaultItems()).filter(i => (i.type === 'screenshot' || i.type === 'document') && !i.archived);
+  // v1.8.6: Also exclude isGroup items in navigator — folders shouldn't appear in dropdown
+  const allItems = (await dbGetAllVaultItems()).filter(i => (i.type === 'screenshot' || i.type === 'document') && !i.archived && !(i.source?.isGroup));
   allItems.sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at));
   const itemIdx = allItems.findIndex(i => i.id === id);
   if (itemIdx < 0) return;

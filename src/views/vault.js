@@ -149,7 +149,11 @@ async function renderList() {
     list.innerHTML = html;
 
     // Wire event listeners
-    list.querySelectorAll('.vault-item').forEach(card => {
+    // v1.8.6 FIX: Exclude folder divs from .vault-item click handler.
+    // Folder divs have class "vault-item vault-folder" — they should only
+    // respond to .folder-toggle click (expand/collapse), NOT openItemDetail.
+    // Before: clicking folder triggered openItemDetail → copyItem → weird behavior.
+    list.querySelectorAll('.vault-item:not(.vault-folder)').forEach(card => {
       const id = card.dataset.id;
       card.addEventListener('click', (e) => {
         if (_batchMode) {
