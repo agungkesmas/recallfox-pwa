@@ -17,6 +17,7 @@ let _filterType = 'all';
 let _sortBy = 'recent';
 let _expandedFolderIds = new Set();  // v1.8.0: folder yang di-expand
 let _currentFolderId = null;  // v1.8.0: null = root, atau folder id untuk breadcrumb navigation
+let _lastRenderToken = null;  // v1.9.2: token untuk detect renderList race condition
 
 const TYPE_LABELS = {
   prompt: { label: 'Prompt', icon: '💬', color: '#10a37f' },
@@ -97,6 +98,25 @@ export function renderVault(user, onRefresh) {
 async function renderList() {
   const list = document.getElementById('vaultList');
   if (!list) return;
+
+  // v1.9.2: Defensive — timeout 10s. Kalau renderList lebih dari 10s, tampilkan
+  // error fallback "Gagal memuat" supaya tidak stuck "Memuat..." selamanya.
+  // Sebelumnya: kalau ada exception atau IndexedDB lambat, list stuck "Memuat...".
+  const renderToken = Symbol('renderList');
+  _lastRenderToken = renderToken;
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    if (_lastRenderToken !== renderToken) return;  // sudah di-render oleh call lain
+    if (list.innerHTML.includes('Memuat')) {
+      timedOut = true;
+      list.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-icon">⚠️</div>
+          <div class="empty-title">Memuat terlalu lama</div>
+          <div class="empty-desc">Koneksi lambat atau IndexedDB sibuk. Ketuk refresh untuk coba lagi.</div>
+        </div>`;
+    }
+  }, 10000);
 
   try {
     const allItems = await dbGetAllVaultItems();
@@ -196,6 +216,10 @@ async function renderList() {
   } catch (e) {
     console.error('[RecallFox] renderVaultList error:', e);
     list.innerHTML = `<div class="error-state">Gagal memuat: ${escapeHtml(e.message)}</div>`;
+  } finally {
+    // v1.9.2: Clear timeout + invalidate token supaya race-condition tidak trigger fallback
+    clearTimeout(timeoutId);
+    if (_lastRenderToken === renderToken) _lastRenderToken = null;
   }
 }
 

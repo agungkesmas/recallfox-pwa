@@ -1,6 +1,12 @@
-// src/share-target.js — v1.9.1: Share target dengan preview modal + judul input + auto-fetch
+// src/share-target.js — v1.9.2: ROBUST share target — no navigateTo after save
 //
-// FIX v1.9.1:
+// FIX v1.9.2 (ROOT CAUSE "memuat terus"):
+// 1. HAPUS window.__rfNavigate('vault') setelah save — itu trigger renderVault async
+//    yang race dengan pullFromCloud di background → list stuck "Memuat..."
+// 2. Setelah save, TETAP di view saat ini. Toast sukses 6 detik + tombol "Lihat" optional.
+// 3. User kontrol navigasi sendiri → tidak ada surprise re-render.
+//
+// FIX v1.9.1 (sebelumnya):
 // 1. withTimeout di upsert Supabase (anti hang/blank)
 // 2. IndexedDB write DULU sebelum cloud (anti data loss)
 // 3. Input judul + auto-fetch page title dari URL
@@ -245,12 +251,14 @@ export async function showSharePreviewModal(data, user) {
   });
 
   // v1.9.1 Fix #5: Tutup modal DULU, save di background, toast feedback
+  // v1.9.2: JANGAN navigateTo('vault') setelah save — itu root cause "memuat terus"
   saveBtn.addEventListener('click', async () => {
     const finalTitle = (titleInput.value || '').trim() || title;
 
-    // Tutup modal dulu — app tetap normal
-    modal.remove();
-    showToast('⏳ Menyimpan...', false);
+    // Disable button supaya tidak double-click
+    saveBtn.disabled = true;
+    saveBtn.textContent = '⏳ Menyimpan...';
+    cancelBtn.disabled = true;
 
     try {
       // v1.9.1 Fix #7: Outer timeout 25s
@@ -259,21 +267,30 @@ export async function showSharePreviewModal(data, user) {
         new Promise((_, rej) => setTimeout(() => rej(new Error('Save timeout 25s')), 25000))
       ]);
 
+      // Tutup modal DULU setelah save berhasil
+      modal.remove();
+
       if (result.ok) {
         const typeLabel2 = result.item.type === 'link' ? '🔗 Link' : (result.item.type === 'context' ? '📋 Konteks' : '💬 Prompt');
+        // v1.9.2: Toast sukses 6 detik + clickable "Lihat di Vault"
+        // TIDAK auto-navigate. User kontrol sendiri.
         if (result.synced) {
-          showToast('✓ Tersimpan ke ' + typeLabel2 + ': ' + (result.item.title || 'Shared item'), false);
+          showSuccessToast('✓ Tersimpan ke ' + typeLabel2, 'Lihat di Vault');
         } else {
-          showToast('✓ Tersimpan lokal — sync cloud gagal: ' + (result.error || ''), true);
+          // Local-only (cloud gagal) — sync_queue akan retry
+          showSuccessToast('✓ Tersimpan lokal (sync nanti)', 'Lihat di Vault');
         }
-        // Navigate ke vault
-        if (window.__rfNavigate) window.__rfNavigate('vault');
-        console.log('[RecallFox/Share] Saved:', result.item.id);
+        console.log('[RecallFox/Share] Saved:', result.item.id, 'synced:', result.synced);
       } else {
         showToast('✗ Gagal: ' + result.error, true);
+        // Re-enable button supaya user bisa retry
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Simpan ke Vault';
+        cancelBtn.disabled = false;
       }
     } catch (e) {
       console.error('[RecallFox/Share] Save exception:', e.message);
+      modal.remove();
       showToast('✗ Error: ' + e.message, true);
     }
   });
@@ -306,7 +323,45 @@ function showToast(msg, isError = false) {
   t.style.background = isError ? '#ef4444' : '#10b981';
   if (t._rfTimer) clearTimeout(t._rfTimer);
   t.style.opacity = '1';
+  t.onclick = null;
   t._rfTimer = setTimeout(() => { t.style.opacity = '0'; }, 4000);
+}
+
+// v1.9.2: Toast sukses dengan tombol "Lihat di Vault" — user klik untuk navigasi.
+// TIDAK auto-navigate. User kontrol sendiri.
+function showSuccessToast(msg, actionLabel) {
+  let t = document.getElementById('rfToast');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'rfToast';
+    document.body.appendChild(t);
+  }
+  // Struktur: [msg] [actionLabel]
+  t.innerHTML = '';
+  const span = document.createElement('span');
+  span.textContent = msg;
+  span.style.cssText = 'margin-right:10px';
+  t.appendChild(span);
+
+  if (actionLabel && window.__rfNavigate) {
+    const btn = document.createElement('button');
+    btn.textContent = actionLabel;
+    btn.style.cssText = 'background:rgba(255,255,255,.25);border:none;color:#fff;padding:4px 10px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer';
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      t.style.opacity = '0';
+      if (t._rfTimer) clearTimeout(t._rfTimer);
+      // v1.9.2: Safe navigate — cek apakah __rfNavigate masih valid
+      try { window.__rfNavigate('vault'); } catch (err) { console.warn('[RecallFox] navigate failed:', err.message); }
+    };
+    t.appendChild(btn);
+  }
+
+  t.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:10px 16px;border-radius:8px;font-size:13px;font-weight:600;color:#fff;z-index:10000;transition:opacity .3s;max-width:90%;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,.3);display:flex;align-items:center;background:#10b981';
+  if (t._rfTimer) clearTimeout(t._rfTimer);
+  t.style.opacity = '1';
+  // 6 detik (lebih lama dari toast biasa 4s) supaya user sempat baca + klik
+  t._rfTimer = setTimeout(() => { t.style.opacity = '0'; }, 6000);
 }
 
 // Legacy exports

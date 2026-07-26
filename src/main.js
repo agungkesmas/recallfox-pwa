@@ -1,4 +1,9 @@
 // src/main.js — Entry point, router, init Supabase + realtime
+// v1.9.2: Share target — anti race condition.
+//   Saat share-target detected, skip pullFromCloud di boot. Pulling akan jalan via polling 10s.
+//   Ini mencegah race antara pullFromCloud (yang lambat, 30+ detik) dengan createShareItem
+//   yang juga akses Supabase. Sebelumnya: pullFromCloud.then() → navigateTo('vault') → 
+//   renderList async baca IndexedDB saat pullFromCloud sedang merge/delete → race → "memuat terus".
 // v1.9.0: Share target — SIMPLIFIED. Jangan proses share di init().
 //   Hanya simpan ke sessionStorage, render app normal, lalu tampilkan
 //   preview modal SETELAH app fully rendered. User konfirmasi → simpan.
@@ -21,6 +26,7 @@ let _realtimeBound = false;
 let _pollTimer = null;
 let _retryTimer = null;
 let _lastPullAt = 0;
+let _skipPullOnBoot = false;  // v1.9.2: true kalau share-target detected
 const POLL_INTERVAL_MS = 10000;
 const RETRY_INTERVAL_MS = 30000;
 
@@ -41,6 +47,8 @@ async function init() {
       url: params.get('url') || ''
     };
     sessionStorage.setItem('rf_pending_share', JSON.stringify(shareData));
+    // v1.9.2: Set flag — pullFromCloud di showApp akan skip jika true
+    _skipPullOnBoot = true;
     console.log('[RecallFox] Share target detected — saved to sessionStorage:', shareData);
 
     // Clean URL IMMEDIATELY — hapus /share-target supaya SW navigation tidak loop
@@ -118,10 +126,18 @@ async function showApp(user) {
   renderShell(user);
   navigateTo(_currentView);
 
-  pullFromCloud(user).then(() => {
-    navigateTo(_currentView);
-    _lastPullAt = Date.now();
-  }).catch(e => console.warn('[RecallFox] pull failed:', e.message));
+  // v1.9.2: Skip pullFromCloud di boot jika share-target detected.
+  // Pulling akan jalan via polling 10s. Ini anti race condition.
+  if (_skipPullOnBoot) {
+    console.log('[RecallFox] Skipping pullFromCloud on boot (share-target mode)');
+    _skipPullOnBoot = false;  // reset flag
+    _lastPullAt = Date.now();  // supaya polling 10s tidak langsung re-pull
+  } else {
+    pullFromCloud(user).then(() => {
+      navigateTo(_currentView);
+      _lastPullAt = Date.now();
+    }).catch(e => console.warn('[RecallFox] pull failed:', e.message));
+  }
 
   processSyncQueue(user).catch(e => console.warn('[RecallFox] queue failed:', e.message));
 
