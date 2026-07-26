@@ -1,18 +1,13 @@
 // src/views/vault.js — Vault tab: render text-based items (prompt, context, snapshot, link, bundle)
 // v1.7.0: Janji cross-device terpenuhi — semua tipe item tampil di PWA, bukan hanya screenshot/document/notes.
-//
-// Item types yang ditampilkan:
-//   - prompt: prompt teks untuk AI
-//   - context: konteks/latar belakang
-//   - snapshot: snapshot percakapan AI
-//   - link: bookmark/link
-//   - bundle: kumpulan item
-//
-// TIDAK ditampilkan di view ini (sudah ada di Media):
-//   - screenshot, document → renderMedia()
+// v1.8.0: Folder tree support — folder yang dibuat di addon tampil di PWA (read-only + collapse).
+//         Pakai buildTree dari lib/vault-tree.js (port dari addon).
+//         Tampilan: indent saja, tanpa connector ├──/└── (mobile-friendly).
+//         Tidak ada DnD — pakai menu "Pindahkan ke Folder" (TODO iterasi berikutnya).
 
 import { dbGetAllVaultItems } from '../db.js';
 import { deleteVaultItem, updateVaultItem } from '../sync.js';
+import { buildTree, isGroupItem, getParentId } from '../lib/vault-tree.js';
 
 let _batchMode = false;
 let _batchSelected = new Set();
@@ -20,6 +15,8 @@ let _onRefresh = null;
 let _searchQuery = '';
 let _filterType = 'all';
 let _sortBy = 'recent';
+let _expandedFolderIds = new Set();  // v1.8.0: folder yang di-expand
+let _currentFolderId = null;  // v1.8.0: null = root, atau folder id untuk breadcrumb navigation
 
 const TYPE_LABELS = {
   prompt: { label: 'Prompt', icon: '💬', color: '#10a37f' },
@@ -103,16 +100,21 @@ async function renderList() {
 
   try {
     const allItems = await dbGetAllVaultItems();
+    // v1.8.0: Filter TEXT_TYPES + folder groups (isGroup). Folder groups punya source.isGroup=true.
     let items = allItems.filter(i => TEXT_TYPES.includes(i.type) && !i.archived);
+    // Include group items untuk tree rendering
+    const groupItems = allItems.filter(i => isGroupItem(i) && !i.archived);
+    items = [...items, ...groupItems];
 
-    // Filter by type
+    // Filter by type (hanya untuk non-group items)
     if (_filterType !== 'all') {
-      items = items.filter(i => i.type === _filterType);
+      items = items.filter(i => isGroupItem(i) || i.type === _filterType);
     }
 
     // Search
     if (_searchQuery) {
       items = items.filter(i => {
+        if (isGroupItem(i)) return (i.title || '').toLowerCase().includes(_searchQuery);
         const title = (i.title || '').toLowerCase();
         const body = (i.body || '').toLowerCase();
         const note = (i.note || '').toLowerCase();
@@ -120,16 +122,16 @@ async function renderList() {
       });
     }
 
-    // Sort
-    if (_sortBy === 'recent') {
-      items.sort((a, b) => new Date(b.updated_at || b.created_at) - new Date(a.updated_at || a.created_at));
-    } else if (_sortBy === 'favorite') {
-      items.sort((a, b) => (b.favorite ? 1 : 0) - (a.favorite ? 1 : 0) || new Date(b.updated_at) - new Date(a.updated_at));
-    } else if (_sortBy === 'title') {
-      items.sort((a, b) => (a.title || '').localeCompare(b.title || ''));
-    }
+    // v1.8.0: Build tree dari items
+    const expandedIds = Array.from(_expandedFolderIds);
+    const categoryFilter = _filterType === 'all' ? null : _filterType;
+    const sortMode = _sortBy === 'recent' ? 'recent'
+                   : _sortBy === 'favorite' ? 'fav'
+                   : _sortBy === 'title' ? 'name'
+                   : 'recent';
+    const tree = buildTree(items, expandedIds, categoryFilter, true, sortMode);
 
-    if (items.length === 0) {
+    if (tree.length === 0) {
       list.innerHTML = `
         <div class="empty-state">
           <div class="empty-icon">🗂️</div>
@@ -139,7 +141,12 @@ async function renderList() {
       return;
     }
 
-    list.innerHTML = items.map(item => renderItemCard(item)).join('');
+    // v1.8.0: Render tree recursively dengan indent (no connector)
+    let html = '';
+    for (const node of tree) {
+      html += renderTreeNode(node, 0);
+    }
+    list.innerHTML = html;
 
     // Wire event listeners
     list.querySelectorAll('.vault-item').forEach(card => {
@@ -151,6 +158,14 @@ async function renderList() {
         } else {
           openItemDetail(id);
         }
+      });
+    });
+
+    // v1.8.0: Folder toggle (expand/collapse)
+    list.querySelectorAll('.folder-toggle').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleFolder(btn.dataset.id);
       });
     });
 
@@ -180,13 +195,56 @@ async function renderList() {
   }
 }
 
-function renderItemCard(item) {
+// v1.8.0: Render tree node — group (folder) atau item biasa.
+// Indent dengan padding-left, no connector lines (mobile-friendly).
+function renderTreeNode(node, depth) {
+  const indent = depth * 16;  // 16px per level
+  if (node.kind === 'group') {
+    const folder = node.item;
+    const isExpanded = node.isExpanded;
+    const folderColor = folder.source?.folderColor || '#6b7280';
+    const childCount = node.children?.length || 0;
+    let html = `
+      <div class="vault-item vault-folder" data-id="${folder.id}" style="margin-left:${indent}px;border-left:3px solid ${folderColor}">
+        <div class="folder-toggle" data-id="${folder.id}" title="${isExpanded ? 'Lipat' : 'Buka'}">
+          ${isExpanded ? '📂' : '📁'} ${escapeHtml(folder.title || 'Folder')}
+          <span class="folder-count">${childCount}</span>
+        </div>
+      </div>
+    `;
+    if (isExpanded && node.children) {
+      for (const child of node.children) {
+        html += renderTreeNode(child, depth + 1);
+      }
+    }
+    return html;
+  } else {
+    // Regular item — pakai renderItemCard dengan indent
+    const item = node.item;
+    return renderItemCard(item, indent);
+  }
+}
+
+// v1.8.0: Toggle folder expand/collapse
+function toggleFolder(folderId) {
+  if (_expandedFolderIds.has(folderId)) {
+    _expandedFolderIds.delete(folderId);
+  } else {
+    _expandedFolderIds.add(folderId);
+  }
+  renderList();
+}
+
+function renderItemCard(item, indent = 0) {
   const typeInfo = TYPE_LABELS[item.type] || { label: item.type, icon: '📄', color: '#6b7280' };
   const isFav = item.favorite ? '⭐' : '☆';
   const title = escapeHtml(item.title || 'Tanpa judul');
   const body = escapeHtml(truncateText(item.body || item.note || '', 150));
   const tags = (item.tags && item.tags.length) ? item.tags.map(t => `<span class="tag">#${escapeHtml(t)}</span>`).join('') : '';
   const isSelected = _batchSelected.has(item.id) ? 'selected' : '';
+  // v1.8.0: GPS location display (jika ada)
+  const location = item.source?.location;
+  const locationInfo = location ? `<div class="item-location">📍 ${escapeHtml(location.address || (location.lat?.toFixed(4) + ', ' + location.lng?.toFixed(4)))}</div>` : '';
 
   // Untuk link, tampilkan URL
   let linkInfo = '';
@@ -212,7 +270,7 @@ function renderItemCard(item) {
   }
 
   return `
-    <div class="vault-item ${isSelected}" data-id="${item.id}">
+    <div class="vault-item ${isSelected}" data-id="${item.id}" style="margin-left:${indent}px">
       <div class="item-type-badge" style="background:${typeInfo.color}">${typeInfo.icon}</div>
       <div class="item-content">
         <div class="item-title">${title}</div>
@@ -220,6 +278,7 @@ function renderItemCard(item) {
         ${linkInfo}
         ${snapshotInfo}
         ${bundleInfo}
+        ${locationInfo}
         ${tags ? `<div class="item-tags">${tags}</div>` : ''}
       </div>
       <div class="item-actions">
