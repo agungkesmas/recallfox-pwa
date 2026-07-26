@@ -926,77 +926,7 @@ export async function createNote(user, payload) {
   return { ok: true, note: row };
 }
 
-// v1.8.0: Create voice note — upload audio blob ke bucket `voice-notes`,
-// lalu simpan note dengan source.kind='voice' + source.audioUrl.
-// Kompatibel dengan addon: addon baca note.source.audioUrl → <audio controls>.
-export async function createVoiceNote(user, payload) {
-  // payload: { blob, mimeType, durationSec, title?, location? }
-  const noteId = genId('vn');
-  const now = new Date().toISOString();
-
-  // Step 1: Upload audio blob
-  const { uploadVoiceBlob } = await import('./lib/voice.js');
-  const upRes = await uploadVoiceBlob(user, noteId, payload.blob, payload.mimeType);
-  if (!upRes.ok) {
-    console.warn('[RecallFox] Voice upload failed, enqueuing for retry:', upRes.error);
-    // Enqueue untuk retry di background (note row tetap dibuat, audioUrl=null dulu)
-    await dbEnqueueSync({
-      op: 'upload_voice',
-      user_id: user.id,
-      item_id: noteId,
-      blob_payload: {
-        // Catatan: blob tidak bisa di-serialize ke JSON queue, jadi simpan dataUrl
-        // kalau queue process perlu retry upload. Untuk simplicity v1.8.0, skip retry
-        // dan return error ke user.
-      },
-      payload: { title: payload.title, durationSec: payload.durationSec, location: payload.location }
-    });
-  }
-
-  // Step 2: Buat note row dengan source.kind='voice'
-  const row = {
-    id: noteId,
-    user_id: user.id,
-    title: payload.title || `🎙️ Voice Note ${new Date().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}`,
-    body: payload.title || `Voice note (${Math.round(payload.durationSec || 0)}s)`,  // body untuk preview
-    color: 'voice',  // discriminator: notes dengan color='voice' adalah voice notes
-    group: null,
-    pinned: false,
-    archived: false,
-    // v1.8.0: source JSONB untuk voice metadata
-    source: {
-      kind: 'voice',
-      audioUrl: upRes.ok ? upRes.url : null,
-      mimeType: payload.mimeType || 'audio/webm',
-      duration: payload.durationSec || 0,
-      capturedAt: now,
-      device: 'pwa-mobile',
-      location: payload.location || null
-    },
-    created_at: now,
-    updated_at: now,
-    deleted_at: null,
-    device_id: getDeviceId()
-  };
-
-  await dbPutNote(row);
-  try {
-    const { error } = await withTimeout(
-      supabase.from(NOTES_TABLE).upsert(row),
-      20000,
-      'voice_note_upsert'
-    );
-    if (error) {
-      await dbEnqueueSync({ op: 'upsert_note', user_id: user.id, row });
-      return { ok: true, note: row, localOnly: true, error: error.message };
-    }
-  } catch (e) {
-    await dbEnqueueSync({ op: 'upsert_note', user_id: user.id, row });
-    return { ok: true, note: row, localOnly: true, error: e.message };
-  }
-  return { ok: true, note: row };
-}
-
+// v1.8.1: Voice notes DIHAPUS — user bilang "batasan mb, tidak terpakai".
 export async function updateNote(user, noteId, patch) {
   const now = new Date().toISOString();
   const updates = { ...patch, updated_at: now, device_id: getDeviceId() };

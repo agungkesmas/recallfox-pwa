@@ -260,9 +260,13 @@ function buildDocCaption(item, totalPages, currentPage) {
   const capturedDateStr = new Date(capturedAt).toLocaleString('id-ID', { dateStyle: 'full', timeStyle: 'short' });
   const note = item.source?.annotationNote || '';
   const pageStr = totalPages > 1 ? (currentPage ? ` (hal ${currentPage}/${totalPages})` : ` (${totalPages} halaman)`) : '';
+  // v1.8.1: Lokasi GPS dari capture (source.location) — kompatibel dengan addon.
+  const loc = item.source?.location;
+  const locStr = loc ? (loc.address || ((loc.lat?.toFixed(4) || '?') + ', ' + (loc.lng?.toFixed(4) || '?'))) : '';
 
   const textPlain = `📄 ${pageTitle}${pageStr}\n`
     + `Waktu: ${capturedDateStr}\n`
+    + (locStr ? `📍 Lokasi: ${locStr}\n` : '')
     + (totalPages > 1 ? `Total halaman: ${totalPages}\n` : '')
     + (note ? `📝 Catatan: ${note}\n` : '')
     + `Ditangkap oleh RecallFox`;
@@ -270,6 +274,7 @@ function buildDocCaption(item, totalPages, currentPage) {
   const textHtml = `<div style="font-family:-apple-system,system-ui,sans-serif;font-size:13px;color:#1c1917">`
     + `<p style="margin:8px 0 2px"><strong>📄 ${escapeHtml(pageTitle)}${pageStr}</strong></p>`
     + `<p style="margin:0 0 2px;color:#57534e">🕒 ${escapeHtml(capturedDateStr)}</p>`
+    + (locStr ? `<p style="margin:0 0 2px;color:#059669">📍 ${escapeHtml(locStr)}</p>` : '')
     + (totalPages > 1 ? `<p style="margin:0 0 2px;color:#57534e">📚 ${totalPages} halaman</p>` : '')
     + (note ? `<p style="margin:0 0 2px;color:#92400e;background:#fef3c7;padding:4px 8px;border-radius:4px">📝 ${escapeHtml(note)}</p>` : '')
     + `<p style="margin:0;color:#78716c">🔧 RecallFox Dokumen</p>`

@@ -25,6 +25,9 @@ export function buildScreenshotCaption(item, dataUrl, opts = {}) {
   const dims = (item.screenshot_width || item.screenshotWidth || 0) + '×' + (item.screenshot_height || item.screenshotHeight || 0) + ' px';
   const annotationNote = item.annotation_note || item.annotationNote || item.source?.annotationNote || item.source?.annotation_note || '';
   const capturedDateStr = new Date(capturedAt).toLocaleString('id-ID', { dateStyle: 'full', timeStyle: 'short' });
+  // v1.8.1: Lokasi GPS dari capture (source.location) — kompatibel dengan addon.
+  const loc = item.source?.location;
+  const locStr = loc ? (loc.address || ((loc.lat?.toFixed(4) || '?') + ', ' + (loc.lng?.toFixed(4) || '?'))) : '';
 
   const index = opts.index;
   const titlePrefix = (typeof index === 'number' && index > 0)
@@ -34,6 +37,7 @@ export function buildScreenshotCaption(item, dataUrl, opts = {}) {
   let textPlain = titlePrefix + pageTitle + '\n'
     + (pageUrl ? 'Sumber: ' + pageUrl + '\n' : '')
     + 'Waktu: ' + capturedDateStr + '\n'
+    + (locStr ? '📍 Lokasi: ' + locStr + '\n' : '')
     + 'Mode: ' + modeLabel + ' · ' + dims + '\n'
     + (annotationNote ? '📝 Catatan: ' + annotationNote + '\n' : '')
     + 'Ditangkap oleh RecallFox';
@@ -47,13 +51,16 @@ export function buildScreenshotCaption(item, dataUrl, opts = {}) {
     html += '<p style="margin:0 0 2px;color:#57534e">🔗 <a href="' + escapeHtml(pageUrl) + '">' + escapeHtml(pageUrl) + '</a></p>';
   }
   html += '<p style="margin:0 0 2px;color:#57534e">🕒 ' + escapeHtml(capturedDateStr) + '</p>';
+  if (locStr) {
+    html += '<p style="margin:0 0 2px;color:#059669">📍 ' + escapeHtml(locStr) + '</p>';
+  }
   if (annotationNote) {
     html += '<p style="margin:0 0 2px;color:#92400e;background:#fef3c7;padding:4px 8px;border-radius:4px">📝 ' + escapeHtml(annotationNote) + '</p>';
   }
   html += '<p style="margin:0;color:#78716c">🔧 ' + escapeHtml(modeLabel) + ' · ' + escapeHtml(dims) + ' · RecallFox</p>';
   html += '</div>';
 
-  return { textPlain, textHtml: html };
+  return { textPlain, textHtml: html, location: locStr };
 }
 
 export function buildBatchCaption(screenshots) {
