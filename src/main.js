@@ -3,6 +3,7 @@
 //         Fallback ke polling 10 detik — pasti jalan, tidak bergantung Realtime.
 // v1.1.0: Fix shell render bug — views render to #appMain, bottom nav persists.
 // v1.1.0: FAB unified — 1 button for both media & catatan (minim klik).
+// v1.8.7: Android Share Sheet — handle /share-target route dari PWA manifest.
 
 import './styles/base.css';
 import './styles/components.css';
@@ -15,6 +16,7 @@ import { renderMedia, startCaptureFlow, startDocumentFlow } from './views/media.
 import { renderNotes, openNoteEditor } from './views/notes.js';
 import { renderSettings } from './views/settings.js';
 import { renderVault } from './views/vault.js';  // v1.7.0: Vault teks (prompt, context, snapshot, link, bundle)
+import { handleShareTarget, processPendingShare } from './share-target.js';  // v1.8.7
 
 let _currentView = 'media';
 let _realtimeBound = false;
@@ -25,16 +27,36 @@ const POLL_INTERVAL_MS = 10000; // 10 detik
 const RETRY_INTERVAL_MS = 30000; // 30 detik — retry sync queue yang gagal
 
 async function init() {
+  // v1.8.7: Cek apakah ini share-target route (dari Android Share Sheet).
+  // Kalau ya, handle share dulu sebelum render app normal.
+  const currentUrl = new URL(window.location.href);
+  const isShareTarget = currentUrl.pathname.endsWith('/share-target') ||
+                        currentUrl.pathname.endsWith('/share-target/');
+
   const session = await getSession();
   if (session?.user) {
     await showApp(session.user);
+    // v1.8.7: Kalau ini share-target, proses share setelah app ready
+    if (isShareTarget) {
+      await handleShareTarget(currentUrl, navigateTo);
+      // Clean URL — hapus /share-target dari address bar supaya refresh tidak re-trigger
+      try {
+        window.history.replaceState({}, document.title, new URL('./', currentUrl).href);
+      } catch (e) {}
+    }
   } else {
     showLogin();
+    // v1.8.7: Kalau belum login + share-target, simpan pending share
+    if (isShareTarget) {
+      await handleShareTarget(currentUrl, navigateTo);
+    }
   }
 
   onAuthChange(async (user) => {
     if (user) {
       await showApp(user);
+      // v1.8.7: Proses pending share setelah login berhasil
+      await processPendingShare(navigateTo);
     } else {
       stopPolling();
       stopRetryQueue();
