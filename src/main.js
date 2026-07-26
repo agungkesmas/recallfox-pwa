@@ -27,28 +27,61 @@ const POLL_INTERVAL_MS = 10000; // 10 detik
 const RETRY_INTERVAL_MS = 30000; // 30 detik — retry sync queue yang gagal
 
 async function init() {
-  // v1.8.7: Cek apakah ini share-target route (dari Android Share Sheet).
-  // Kalau ya, handle share dulu sebelum render app normal.
+  // v1.8.9: Cek share-target route SEBELUM render app.
+  // Kalau share-target, proses share dulu, LALU render app normal.
   const currentUrl = new URL(window.location.href);
   const isShareTarget = currentUrl.pathname.endsWith('/share-target') ||
                         currentUrl.pathname.endsWith('/share-target/');
 
+  console.log('[RecallFox] init called. isShareTarget:', isShareTarget, 'pathname:', currentUrl.pathname);
+
   const session = await getSession();
   if (session?.user) {
-    await showApp(session.user);
-    // v1.8.7: Kalau ini share-target, proses share setelah app ready
+    // v1.8.9: Kalau share-target, proses share DULU sebelum showApp
+    // supaya navigateTo('vault') tidak bentrok dengan render media.
     if (isShareTarget) {
-      await handleShareTarget(currentUrl, navigateTo);
-      // Clean URL — hapus /share-target dari address bar supaya refresh tidak re-trigger
+      console.log('[RecallFox] Share target detected — processing share before app render');
+      try {
+        await handleShareTarget(currentUrl, null); // null = jangan navigate yet
+      } catch (e) {
+        console.error('[RecallFox] Share target error:', e.message);
+      }
+      // Clean URL — hapus /share-target dari address bar
       try {
         window.history.replaceState({}, document.title, new URL('./', currentUrl).href);
       } catch (e) {}
     }
-  } else {
-    showLogin();
-    // v1.8.7: Kalau belum login + share-target, simpan pending share
+
+    // Render app normal
+    await showApp(session.user);
+
+    // v1.8.9: Kalau tadi share-target, navigate ke vault SETELAH app ready + pull selesai
     if (isShareTarget) {
-      await handleShareTarget(currentUrl, navigateTo);
+      // Tunggu pullFromCloud selesai supaya data share item sudah ada di IndexedDB
+      try {
+        await pullFromCloud(session.user);
+      } catch (e) {
+        console.warn('[RecallFox] Pull after share failed (non-critical):', e.message);
+      }
+      // Sekarang navigate ke vault
+      navigateTo('vault');
+      console.log('[RecallFox] Navigated to vault after share');
+    }
+  } else {
+    // Belum login
+    showLogin();
+    if (isShareTarget) {
+      // Simpan pending share, proses setelah login
+      console.log('[RecallFox] Share target but not logged in — saving pending share');
+      try {
+        await handleShareTarget(currentUrl, null);
+      } catch (e) {
+        console.error('[RecallFox] Share target (not logged in) error:', e.message);
+      }
+      // Clean URL
+      try {
+        window.history.replaceState({}, document.title, new URL('./', currentUrl).href);
+      } catch (e) {}
     }
   }
 

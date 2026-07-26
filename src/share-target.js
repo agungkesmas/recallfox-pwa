@@ -164,6 +164,8 @@ export async function handleShareTarget(url, navigateTo) {
   const result = await createShareItem(session.user, { title, text: cleanText, url: cleanUrl });
   if (result.ok) {
     console.log('[RecallFox/Share] Item saved:', result.item.id, 'type:', result.item.type);
+    // v1.8.9: navigateTo bisa null (dipanggil sebelum app render) —
+    // main.js yang handle navigate setelah app ready
     if (navigateTo) navigateTo('vault');
     const typeLabel = result.item.type === 'link' ? '🔗 Link' : (result.item.type === 'context' ? '📋 Konteks' : '💬 Prompt');
     showShareToast('✓ Tersimpan ke ' + typeLabel + ': ' + (result.item.title || 'Shared item'));
