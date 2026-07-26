@@ -1,5 +1,6 @@
 // lib/vault-tree.js — v3.18.4: Recursive nested folder support
-// Storage: parentId/isGroup/order di item.source (JSONB) — no ALTER TABLE needed.
+// v1.9.3 PWA: Tambah helper isPinned/getPinnedAt + sortByMode prioritaskan pinned.
+// Storage: parentId/isGroup/order/folderColor/pinned di item.source (JSONB) — no ALTER TABLE needed.
 // Folder bisa berisi folder lagi (nested) — seperti file manager.
 
 // ===== Schema helpers =====
@@ -28,6 +29,28 @@ export function getOrder(item) {
 export function setOrder(item, order) {
   if (!item.source) item.source = {};
   item.source.order = order;
+}
+
+// v1.9.3 PWA: Pin helpers — pinned item muncul di atas daftar (mode recent/fav).
+// Disimpan di source.pinned (boolean) + source.pinnedAt (ISO timestamp) supaya
+// bisa sort pinned items by recency.
+export function isPinned(item) {
+  return !!(item?.source?.pinned);
+}
+
+export function getPinnedAt(item) {
+  return item?.source?.pinnedAt || null;
+}
+
+export function setPinned(item, pinned) {
+  if (!item.source) item.source = {};
+  if (pinned) {
+    item.source.pinned = true;
+    if (!item.source.pinnedAt) item.source.pinnedAt = new Date().toISOString();
+  } else {
+    item.source.pinned = false;
+    item.source.pinnedAt = null;
+  }
 }
 
 // ===== Create group =====
@@ -68,7 +91,7 @@ export function createGroup(name, type) {
 export function buildTree(items, expandedIds, categoryFilter, showGroups, sortMode) {
   // v3.19.0: sortMode — 'recent'|'name'|'oldest'|'uses'|'fav' (default: 'recent')
   const sm = sortMode || 'recent';
-  // v3.18.4: Build index
+  // v1.9.3 PWA: Build index
   const allByParent = new Map();
   const topLevel = [];
 
@@ -83,17 +106,37 @@ export function buildTree(items, expandedIds, categoryFilter, showGroups, sortMo
   }
 
   // v3.19.0: Sort function berdasarkan sortMode
+  // v1.9.3 PWA: Pinned selalu di atas (kecuali mode 'name' — alfabetis murni).
+  // Pattern sama dengan addon notes (pinnedFirst helper).
   function sortByMode(a, b) {
     // Groups always first
     const ag = isGroupItem(a) ? 0 : 1;
     const bg = isGroupItem(b) ? 0 : 1;
     if (ag !== bg) return ag - bg;
+
+    // v1.9.3: Pinned first (kecuali mode 'name' — biar konsisten alfabetis)
+    if (sm !== 'name') {
+      const pa = isPinned(a) ? 0 : 1;
+      const pb = isPinned(b) ? 0 : 1;
+      if (pa !== pb) return pa - pb;
+    }
+
     // Both groups or both items — sort by mode
     if (sm === 'name') return (a.title || '').localeCompare(b.title || '');
     if (sm === 'oldest') return new Date(a.createdAt || 0) - new Date(b.createdAt || 0);
     if (sm === 'uses') return (b.useCount || 0) - (a.useCount || 0);
-    if (sm === 'fav') return ((b.favorite ? 1 : 0) - (a.favorite ? 1 : 0)) || (new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    if (sm === 'fav') {
+      // Pinned dulu (sudah di atas), lalu favorit, lalu recent
+      const fa = a.favorite ? 0 : 1;
+      const fb = b.favorite ? 0 : 1;
+      if (fa !== fb) return fa - fb;
+      return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+    }
     // default: recent (newest first)
+    // Pinned: sort by pinnedAt desc supaya pin terbaru di paling atas
+    if (isPinned(a) && isPinned(b)) {
+      return new Date(getPinnedAt(b) || 0) - new Date(getPinnedAt(a) || 0);
+    }
     return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
   }
 

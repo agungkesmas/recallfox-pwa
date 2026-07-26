@@ -3,11 +3,18 @@
 // v1.8.0: Folder tree support — folder yang dibuat di addon tampil di PWA (read-only + collapse).
 //         Pakai buildTree dari lib/vault-tree.js (port dari addon).
 //         Tampilan: indent saja, tanpa connector ├──/└── (mobile-friendly).
-//         Tidak ada DnD — pakai menu "Pindahkan ke Folder" (TODO iterasi berikutnya).
+// v1.9.3: UX/UI overhaul:
+//   1. Menu titik-tiga (⋯) per item → bottom sheet: Pin, Pindahkan ke Folder, Salin, Hapus
+//   2. Pin/Sematkan — pinned item muncul di atas daftar (source.pinned + pinnedAt)
+//   3. DnD dengan auto-scroll saat drag ke tepi atas/bawah
+//   4. State update instan: dbPutVaultItem langsung + updateVaultItem cloud, renderList() (bukan reload)
 
-import { dbGetAllVaultItems } from '../db.js';
+import { dbGetAllVaultItems, dbPutVaultItem } from '../db.js';
 import { deleteVaultItem, updateVaultItem } from '../sync.js';
-import { buildTree, isGroupItem, getParentId } from '../lib/vault-tree.js';
+import {
+  buildTree, isGroupItem, getParentId, setParentId,
+  isPinned, setPinned
+} from '../lib/vault-tree.js';
 
 let _batchMode = false;
 let _batchSelected = new Set();
@@ -18,6 +25,7 @@ let _sortBy = 'recent';
 let _expandedFolderIds = new Set();  // v1.8.0: folder yang di-expand
 let _currentFolderId = null;  // v1.8.0: null = root, atau folder id untuk breadcrumb navigation
 let _lastRenderToken = null;  // v1.9.2: token untuk detect renderList race condition
+let _dndAutoScrollTimer = null;  // v1.9.3: timer untuk auto-scroll saat DnD
 
 const TYPE_LABELS = {
   prompt: { label: 'Prompt', icon: '💬', color: '#10a37f' },
@@ -213,6 +221,65 @@ async function renderList() {
         confirmDelete(btn.dataset.id);
       });
     });
+
+    // v1.9.3: Item menu (⋯) → bottom sheet dengan opsi Pin/Move/Copy/Delete
+    list.querySelectorAll('.item-menu').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openItemMenuSheet(btn.dataset.id);
+      });
+    });
+
+    // v1.9.3: Folder as drop target (move item into folder via DnD)
+    list.querySelectorAll('.vault-folder').forEach(folder => {
+      folder.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        folder.classList.add('drag-over');
+      });
+      folder.addEventListener('dragleave', () => folder.classList.remove('drag-over'));
+      folder.addEventListener('drop', (e) => {
+        e.preventDefault();
+        folder.classList.remove('drag-over');
+        const itemId = e.dataTransfer.getData('text/plain');
+        if (itemId && itemId !== folder.dataset.id) {
+          moveItemToFolder(itemId, folder.dataset.id);
+        }
+      });
+    });
+
+    // v1.9.3: Drop to top-level (vault-list itu sendiri) = unparent
+    list.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+    });
+    list.addEventListener('drop', (e) => {
+      // Hanya trigger kalau drop target = list itu sendiri (bukan item/folder)
+      if (e.target === list) {
+        e.preventDefault();
+        const itemId = e.dataTransfer.getData('text/plain');
+        if (itemId) {
+          // Drop ke area kosong = keluarkan dari folder (parentId = null)
+          moveItemToFolder(itemId, null);
+        }
+      }
+    });
+
+    // v1.9.3: Make items draggable (anti long-distance scroll issue)
+    list.querySelectorAll('.vault-item:not(.vault-folder)').forEach(card => {
+      card.setAttribute('draggable', 'true');
+      card.addEventListener('dragstart', (e) => {
+        e.dataTransfer.setData('text/plain', card.dataset.id);
+        e.dataTransfer.effectAllowed = 'move';
+        card.classList.add('dragging');
+      });
+      card.addEventListener('dragend', () => {
+        card.classList.remove('dragging');
+        stopDndAutoScroll();
+      });
+      // Auto-scroll saat drag mendekati tepi atas/bawah
+      card.addEventListener('drag', (e) => handleDndAutoScroll(e));
+    });
   } catch (e) {
     console.error('[RecallFox] renderVaultList error:', e);
     list.innerHTML = `<div class="error-state">Gagal memuat: ${escapeHtml(e.message)}</div>`;
@@ -266,10 +333,13 @@ function toggleFolder(folderId) {
 function renderItemCard(item, indent = 0) {
   const typeInfo = TYPE_LABELS[item.type] || { label: item.type, icon: '📄', color: '#6b7280' };
   const isFav = item.favorite ? '⭐' : '☆';
+  const pinned = isPinned(item);  // v1.9.3
   const title = escapeHtml(item.title || 'Tanpa judul');
   const body = escapeHtml(truncateText(item.body || item.note || '', 150));
   const tags = (item.tags && item.tags.length) ? item.tags.map(t => `<span class="tag">#${escapeHtml(t)}</span>`).join('') : '';
   const isSelected = _batchSelected.has(item.id) ? 'selected' : '';
+  const pinnedCls = pinned ? 'is-pinned' : '';  // v1.9.3
+  const pinnedBadge = pinned ? '<span class="pinned-badge" title="Disematkan">📌</span>' : '';  // v1.9.3
   // v1.8.0: GPS location display (jika ada)
   const location = item.source?.location;
   const locationInfo = location ? `<div class="item-location">📍 ${escapeHtml(location.address || (location.lat?.toFixed(4) + ', ' + location.lng?.toFixed(4)))}</div>` : '';
@@ -298,10 +368,10 @@ function renderItemCard(item, indent = 0) {
   }
 
   return `
-    <div class="vault-item ${isSelected}" data-id="${item.id}" style="margin-left:${indent}px">
+    <div class="vault-item ${isSelected} ${pinnedCls}" data-id="${item.id}" style="margin-left:${indent}px">
       <div class="item-type-badge" style="background:${typeInfo.color}">${typeInfo.icon}</div>
       <div class="item-content">
-        <div class="item-title">${title}</div>
+        <div class="item-title">${pinnedBadge}${title}</div>
         ${body ? `<div class="item-body">${body}</div>` : ''}
         ${linkInfo}
         ${snapshotInfo}
@@ -311,8 +381,7 @@ function renderItemCard(item, indent = 0) {
       </div>
       <div class="item-actions">
         <button class="item-fav" data-id="${item.id}" title="Favorit">${isFav}</button>
-        <button class="item-copy" data-id="${item.id}" title="Salin">📋</button>
-        <button class="item-delete" data-id="${item.id}" title="Hapus">🗑️</button>
+        <button class="item-menu" data-id="${item.id}" title="Menu">⋯</button>
       </div>
     </div>
   `;
@@ -364,6 +433,235 @@ async function doDelete(id) {
   } catch (e) {
     console.error('[RecallFox] doDelete error:', e);
     showToast('Gagal hapus: ' + e.message);
+  }
+}
+
+// ============================================================
+// v1.9.3: Item Menu Sheet (⋯) — Pin, Move, Copy, Delete
+// ============================================================
+function openItemMenuSheet(itemId) {
+  // Buat sheet sekali pakai
+  const sheet = document.createElement('div');
+  sheet.className = 'bottom-sheet';
+  sheet.innerHTML = `
+    <div class="sheet-backdrop"></div>
+    <div class="sheet-content">
+      <div class="sheet-handle"></div>
+      <div id="itemMenuBody">Memuat...</div>
+    </div>
+  `;
+  document.body.appendChild(sheet);
+  // Animasi open
+  requestAnimationFrame(() => sheet.classList.add('open'));
+
+  const close = () => {
+    sheet.classList.remove('open');
+    setTimeout(() => sheet.remove(), 250);
+  };
+  sheet.querySelector('.sheet-backdrop').addEventListener('click', close);
+
+  // Render body async (perlu ambil item dari IndexedDB)
+  (async () => {
+    const items = await dbGetAllVaultItems();
+    const item = items.find(i => i.id === itemId);
+    if (!item) { close(); return; }
+    const pinned = isPinned(item);
+    const typeLabel = TYPE_LABELS[item.type]?.label || item.type;
+    const title = escapeHtml(truncateText(item.title || 'Tanpa judul', 50));
+
+    const body = sheet.querySelector('#itemMenuBody');
+    body.innerHTML = `
+      <h3 style="margin-bottom:8px;font-size:15px">${typeLabel} · ${title}</h3>
+      <button class="sheet-btn" data-action="pin">${pinned ? '📌 Lepas Sematan' : '📌 Sematkan ke Atas'}</button>
+      <button class="sheet-btn" data-action="move">📂 Pindahkan ke Folder...</button>
+      <button class="sheet-btn" data-action="copy">📋 Salin Teks</button>
+      <button class="sheet-btn" data-action="fav">${item.favorite ? '⭐ Lepas Favorit' : '⭐ Tandai Favorit'}</button>
+      <button class="sheet-btn cancel" data-action="delete" style="color:#ef4444">🗑️ Hapus</button>
+      <button class="sheet-btn cancel" data-action="close">✕ Tutup</button>
+    `;
+
+    body.querySelectorAll('[data-action]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const action = btn.dataset.action;
+        close();
+        // Delay supaya sheet close animasi selesai dulu
+        setTimeout(async () => {
+          if (action === 'pin') await togglePin(itemId);
+          else if (action === 'move') openMoveToFolderSheet(itemId);
+          else if (action === 'copy') copyItem(itemId);
+          else if (action === 'fav') toggleFavorite(itemId);
+          else if (action === 'delete') confirmDelete(itemId);
+        }, 100);
+      });
+    });
+  })();
+}
+
+// ============================================================
+// v1.9.3: Move To Folder Sheet — pilih folder dari daftar tree
+// ============================================================
+function openMoveToFolderSheet(itemId) {
+  (async () => {
+    const allItems = await dbGetAllVaultItems();
+    const item = allItems.find(i => i.id === itemId);
+    if (!item) return;
+    const currentParent = getParentId(item);
+
+    // Ambil semua folder (group items), exclude item itself
+    const allFolders = allItems.filter(i => isGroupItem(i) && !i.archived && i.id !== itemId);
+    if (allFolders.length === 0) {
+      showToast('Belum ada folder. Buat folder dulu di addon.');
+      return;
+    }
+
+    const sheet = document.createElement('div');
+    sheet.className = 'bottom-sheet';
+    sheet.innerHTML = `
+      <div class="sheet-backdrop"></div>
+      <div class="sheet-content" style="max-height:80vh;overflow-y:auto">
+        <div class="sheet-handle"></div>
+        <h3 style="margin-bottom:8px;font-size:15px">📂 Pindahkan ke Folder</h3>
+        <div id="folderListBody"></div>
+      </div>
+    `;
+    document.body.appendChild(sheet);
+    requestAnimationFrame(() => sheet.classList.add('open'));
+
+    const close = () => {
+      sheet.classList.remove('open');
+      setTimeout(() => sheet.remove(), 250);
+    };
+    sheet.querySelector('.sheet-backdrop').addEventListener('click', close);
+
+    const list = sheet.querySelector('#folderListBody');
+    let html = `<button class="sheet-btn" data-fid="" style="${!currentParent ? 'background:#ede9fe;font-weight:700' : ''}">📤 Top-level (keluarkan dari folder)${!currentParent ? ' ✓' : ''}</button>`;
+
+    // Build folder tree untuk display nested
+    const nodes = buildTree(allFolders, [], null, true, 'name');
+    function renderFolderOption(node, depth) {
+      if (node.kind === 'group') {
+        const indent = '&nbsp;&nbsp;&nbsp;&nbsp;'.repeat(depth);
+        const isCurrent = currentParent === node.item.id;
+        const folderColor = node.item.source?.folderColor || '#6b7280';
+        html += `<button class="sheet-btn" data-fid="${node.item.id}" style="${isCurrent ? 'background:#ede9fe;font-weight:700' : ''};text-align:left">`
+          + `<span style="display:inline-block;width:4px;height:16px;background:${folderColor};border-radius:2px;margin-right:8px;vertical-align:middle"></span>`
+          + `${indent}📁 ${escapeHtml(node.item.title || 'Folder')}${isCurrent ? ' ✓' : ''}`
+          + `</button>`;
+        if (node.children) node.children.forEach(c => renderFolderOption(c, depth + 1));
+      }
+    }
+    nodes.forEach(n => renderFolderOption(n, 0));
+    list.innerHTML = html;
+
+    list.querySelectorAll('[data-fid]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const fid = btn.dataset.fid || null;
+        close();
+        setTimeout(() => moveItemToFolder(itemId, fid), 100);
+      });
+    });
+  })();
+}
+
+// ============================================================
+// v1.9.3: Move item to folder — update source.parentId lokal + cloud
+// ============================================================
+async function moveItemToFolder(itemId, targetFolderId) {
+  try {
+    const items = await dbGetAllVaultItems();
+    const item = items.find(i => i.id === itemId);
+    if (!item) return;
+    const oldParent = getParentId(item);
+    if (oldParent === targetFolderId) {
+      showToast('Item sudah di folder ini');
+      return;
+    }
+    // Anti circular: kalau item adalah group, pastikan targetFolderId bukan descendant-nya
+    if (targetFolderId && isGroupItem(item)) {
+      let current = targetFolderId;
+      while (current) {
+        if (current === itemId) {
+          showToast('⚠ Tidak bisa pindah folder ke dalam dirinya sendiri');
+          return;
+        }
+        const parent = items.find(i => i.id === current);
+        current = parent ? getParentId(parent) : null;
+      }
+    }
+    // Update source.parentId
+    if (!item.source) item.source = {};
+    setParentId(item, targetFolderId);
+    // v1.9.3: Auto-expand target folder supaya user langsung lihat item yang dipindah
+    if (targetFolderId) _expandedFolderIds.add(targetFolderId);
+    // Update lokal instan (user langsung lihat perubahan)
+    await dbPutVaultItem(item);
+    // Update cloud (async, tidak block UI)
+    await updateVaultItem(window.__rfUser, itemId, { source: item.source });
+    showToast(targetFolderId ? '✓ Dipindahkan ke folder' : '✓ Dikeluarkan dari folder');
+    renderList();
+  } catch (e) {
+    console.error('[RecallFox] moveItemToFolder error:', e);
+    showToast('Gagal pindahkan: ' + e.message);
+  }
+}
+
+// ============================================================
+// v1.9.3: Toggle Pin — sematkan/lepas item ke atas daftar
+// ============================================================
+async function togglePin(itemId) {
+  try {
+    const items = await dbGetAllVaultItems();
+    const item = items.find(i => i.id === itemId);
+    if (!item) return;
+    const newPinned = !isPinned(item);
+    setPinned(item, newPinned);
+    // Update lokal instan
+    await dbPutVaultItem(item);
+    // Update cloud
+    await updateVaultItem(window.__rfUser, itemId, { source: item.source });
+    showToast(newPinned ? '📌 Disematkan ke atas' : 'Pin dilepas');
+    renderList();
+  } catch (e) {
+    console.error('[RecallFox] togglePin error:', e);
+    showToast('Gagal pin: ' + e.message);
+  }
+}
+
+// ============================================================
+// v1.9.3: Auto-scroll saat DnD mendekati tepi atas/bawah
+// Solusi untuk "item di bawah sulit dipindah ke folder di atas"
+// ============================================================
+function handleDndAutoScroll(e) {
+  // e.clientY = posisi cursor relatif viewport
+  // clientY < 100 → scroll ke atas, clientY > window.innerHeight - 100 → scroll ke bawah
+  const EDGE = 80;  // px dari tepi untuk trigger
+  const SPEED = 15;  // px per frame
+  const clientY = e.clientY;
+  if (clientY == null || isNaN(clientY)) return;
+
+  stopDndAutoScroll();  // clear timer lama
+
+  let direction = 0;
+  if (clientY < EDGE) direction = -1;
+  else if (clientY > window.innerHeight - EDGE) direction = 1;
+
+  if (direction !== 0) {
+    _dndAutoScrollTimer = setInterval(() => {
+      // Scroll container utama (bisa window atau .app-main)
+      const main = document.getElementById('appMain');
+      if (main) {
+        main.scrollBy(0, direction * SPEED);
+      } else {
+        window.scrollBy(0, direction * SPEED);
+      }
+    }, 16);  // ~60fps
+  }
+}
+
+function stopDndAutoScroll() {
+  if (_dndAutoScrollTimer) {
+    clearInterval(_dndAutoScrollTimer);
+    _dndAutoScrollTimer = null;
   }
 }
 

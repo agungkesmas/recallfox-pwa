@@ -659,6 +659,35 @@
 }
 .item-actions button:hover { background: var(--bg); color: var(--text); }
 .item-actions .item-fav { font-size: 16px; }
+.item-actions .item-menu { font-size: 18px; font-weight: 700; line-height: 1; }
+
+/* v1.9.3: Pinned item — highlight + border kiri ungu */
+.vault-item.is-pinned {
+  border-left: 3px solid #6d3df5;
+  background: linear-gradient(90deg, color-mix(in srgb, #6d3df5 6%, var(--surface)) 0%, var(--surface) 30%);
+}
+.pinned-badge {
+  display: inline-block; margin-right: 6px; font-size: 12px;
+}
+
+/* v1.9.3: Drag-and-drop styles */
+.vault-item.dragging {
+  opacity: 0.4;
+  border: 2px dashed var(--accent, #6d3df5);
+}
+.vault-folder.drag-over {
+  background: color-mix(in srgb, #6d3df5 15%, var(--surface-2, #f5f5f4)) !important;
+  border-color: var(--accent, #6d3df5) !important;
+  transform: scale(1.02);
+  transition: transform .15s, background .15s;
+}
+.vault-folder { transition: transform .15s, background .15s, border-color .15s; }
+
+/* v1.9.3: Bottom sheet handle (jika belum ada di components.css) */
+.sheet-handle {
+  width: 36px; height: 4px; background: var(--border, #e7e5e4);
+  border-radius: 2px; margin: 4px auto 12px;
+}
 .empty-state {
   text-align: center; padding: 60px 20px; color: var(--text-muted);
 }
