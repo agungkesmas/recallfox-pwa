@@ -43,6 +43,7 @@ export function openAnnotateEditor(dataUrl, opts = {}) {
     let imgWidth = 0, imgHeight = 0;
     let displayScale = 1;
     let annotationNote = opts.initialNote || '';
+    let title = opts.initialTitle || `HP Capture ${new Date().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}`;
 
     // ===== DOM =====
     const overlay = document.createElement('div');
@@ -60,6 +61,7 @@ export function openAnnotateEditor(dataUrl, opts = {}) {
         <input class="rf-anno-text-input" type="text" style="display:none" placeholder="Teks...">
       </div>
       <div class="rf-anno-note-row">
+        <input class="rf-anno-title-input" type="text" placeholder="📷 Nama file..." value="${title.replace(/"/g, '&quot;')}">
         <input class="rf-anno-note-input" type="text" placeholder="📝 Catatan anotasi (opsional)..." value="${annotationNote.replace(/"/g, '&quot;')}">
       </div>
       <div class="rf-anno-toolbar">
@@ -85,6 +87,7 @@ export function openAnnotateEditor(dataUrl, opts = {}) {
     const previewCanvas = overlay.querySelector('.rf-anno-preview');
     const textInput = overlay.querySelector('.rf-anno-text-input');
     const noteInput = overlay.querySelector('.rf-anno-note-input');
+    const titleInput = overlay.querySelector('.rf-anno-title-input');
     const bgCtx = bgCanvas.getContext('2d');
     const drawCtx = drawCanvas.getContext('2d');
     const previewCtx = previewCanvas.getContext('2d');
@@ -350,8 +353,9 @@ export function openAnnotateEditor(dataUrl, opts = {}) {
         bgCtx.drawImage(drawCanvas, 0, 0);
         const outDataUrl = bgCanvas.toDataURL('image/png');
         annotationNote = noteInput.value.trim();
+        title = titleInput.value.trim() || title;
         cleanup();
-        resolve({ dataUrl: outDataUrl, annotationNote, cancelled: false });
+        resolve({ dataUrl: outDataUrl, annotationNote, title, cancelled: false });
       } else if (action === 'undo') {
         restoreUndoState();
       } else if (action === 'redo') {

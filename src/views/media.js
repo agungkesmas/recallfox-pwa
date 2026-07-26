@@ -500,12 +500,8 @@ export async function startCaptureFlow(source, onDone) {
   if (annoRes.cancelled) return;
 
   const finalDataUrl = annoRes.dataUrl;
-
-  // v1.8.2: Prompt nama file (sama seperti document flow yang punya form nama)
-  const defaultTitle = `HP Capture ${new Date().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}`;
-  const userTitle = prompt('Nama file:', defaultTitle);
-  if (userTitle === null) return; // user cancel
-  const finalTitle = userTitle.trim() || defaultTitle;
+  // v1.8.3: Title dari annotate editor input (inline, bukan prompt popup)
+  const finalTitle = annoRes.title || `HP Capture ${new Date().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}`;
 
   showToast('Menyimpan...');
 
