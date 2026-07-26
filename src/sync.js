@@ -1009,15 +1009,17 @@ export async function pullFromCloud(user) {
     for (const li of localItems) {
       if (!cloudIds.has(li.id) && li.user_id === user.id) {
         // v1.8.4: HAPUS isOwnDevice check — itu bikin deletion tidak propagate cross-device.
-        //   Sebelumnya: item yang dibuat di PWA tidak dihapus meski sudah di-hard-delete di cloud
-        //   via addon. User: "aku menghapus media tersisa dua tapi di pwa masih banyak."
         //   Sekarang: hanya 60s grace period (sama seperti addon pullFromSupabaseV33).
-        //   60s cukup untuk retry queue jalan — kalau masih belum sync setelah 60s, biarkan
-        //   sync_queue yang handle re-push.
+        // v1.9.4 FIX: Jangan hapus isGroup items (folders) yang belum sync ke cloud.
+        //   Folder items dibuat di addon tapi mungkin belum ter-push ke Supabase.
+        //   Jika PWA pull menghapusnya dari IndexedDB, folder hilang dari PWA.
+        //   User report: "ada prompt dan folder yang hilang setelah pwa diperbaiki"
+        if (li.source?.isGroup) {
+          continue; // Skip deletion — folder mungkin belum sync
+        }
         const createdAt = new Date(li.created_at || 0).getTime();
         if (now - createdAt > 60000) {
           await dbDeleteVaultItem(li.id);
-          // v1.2.0: Hapus juga blob screenshot-nya (cleanup IndexedDB)
           await dbDeleteScreenshotBlob(li.id);
         }
       }
