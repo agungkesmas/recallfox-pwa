@@ -1,5 +1,7 @@
 // src/views/settings.js — Settings view: account + sync status + about
 // v1.7.1: Fix version label (sebelumnya hardcoded "v1.0.0"), tambah info lengkap
+// v1.8.7: Version sekarang dynamic — di-inject via Vite define di vite.config.js
+//         (lihat __APP_VERSION__ define). Tidak perlu update manual setiap release.
 
 import { signOut } from '../auth.js';
 import { processSyncQueue } from '../sync.js';
@@ -11,7 +13,9 @@ export async function renderSettings(user, onLogout) {
   const queue = await dbGetSyncQueue();
   const vaultItems = await dbGetAllVaultItems();
   const notes = await dbGetAllNotes();
-  const version = '1.7.1';
+  // v1.8.7: __APP_VERSION__ di-inject oleh Vite saat build (lihat vite.config.js define).
+  // Fallback '1.8.7' kalau define tidak jalan (dev mode tanpa config).
+  const version = (typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : null) || '1.8.7';
 
   // Hitung statistik per tipe
   const typeStats = {};

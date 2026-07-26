@@ -1,8 +1,14 @@
 import { defineConfig } from 'vite';
 import { VitePWA } from 'vite-plugin-pwa';
+import pkg from './package.json' assert { type: 'json' };
 
 export default defineConfig({
   base: './',
+  // v1.8.7: Inject version dari package.json ke global __APP_VERSION__ saat build.
+  // Dipakai di src/views/settings.js untuk display version (ganti hardcoded string).
+  define: {
+    __APP_VERSION__: JSON.stringify(pkg.version)
+  },
   build: {
     outDir: 'dist',
     sourcemap: false,
