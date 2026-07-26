@@ -1,18 +1,21 @@
-// src/share-target.js — v1.9.0: Preview modal untuk share target
-// User share link → PWA terbuka → app render normal → preview modal muncul
-// User lihat preview → klik "Simpan" → item disimpan ke Supabase → navigate vault
-// User klik "Batal" → tidak simpan, tetap di app normal
+// src/share-target.js — v1.9.1: Share target dengan preview modal + judul input + auto-fetch
 //
-// FLOW:
-// 1. Android Share Sheet → buka /share-target?title=...&text=...&url=...
-// 2. main.js init() → simpan ke sessionStorage → clean URL → render app normal
-// 3. Setelah showApp() selesai → showSharePreviewModal(data, user)
-// 4. Modal muncul dengan preview (URL/title/text)
-// 5. User klik "Simpan ke Vault" → createShareItem → navigate vault → toast
-// 6. User klik "Batal" → modal tutup → tetap di app
+// FIX v1.9.1:
+// 1. withTimeout di upsert Supabase (anti hang/blank)
+// 2. IndexedDB write DULU sebelum cloud (anti data loss)
+// 3. Input judul + auto-fetch page title dari URL
+// 4. Toast z-index 10000 (di atas modal 9999)
+// 5. Modal tutup dulu, save di background, toast feedback
+// 6. Cancel button kasih toast feedback
 
 import { getSession } from './auth.js';
+import { withTimeout, getDeviceId } from './sync.js';
+import { dbPutVaultItem, dbEnqueueSync } from './db.js';
 
+/**
+ * v1.9.1: Create share item — IndexedDB DULU, cloud dengan timeout.
+ * Pattern sama dengan createScreenshotItem (v1.5.1 fix).
+ */
 async function createShareItem(user, payload) {
   const { supabase, VAULT_TABLE } = await import('./supabase.js');
   const itemId = 'sh_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
@@ -74,41 +77,63 @@ async function createShareItem(user, payload) {
     created_at: now,
     updated_at: now,
     deleted_at: null,
-    device_id: 'pwa-share'
+    device_id: getDeviceId()
   };
 
   console.log('[RecallFox/Share] Creating item:', itemId, 'type:', type, 'title:', title);
 
+  // v1.9.1 Fix #2: IndexedDB DULU — data tidak pernah hilang walau cloud hang
   try {
-    const { error } = await supabase.from(VAULT_TABLE).upsert(row);
-    if (error) {
-      console.error('[RecallFox/Share] Supabase error:', error.message);
-      return { ok: false, error: error.message };
-    }
-    try {
-      const { dbPutVaultItem } = await import('./db.js');
-      await dbPutVaultItem(row);
-    } catch (e) {}
-    return { ok: true, item: row };
+    await dbPutVaultItem(row);
+    console.log('[RecallFox/Share] IndexedDB write OK:', itemId);
   } catch (e) {
-    console.error('[RecallFox/Share] Exception:', e.message);
-    return { ok: false, error: e.message };
+    console.error('[RecallFox/Share] IndexedDB write FAILED:', e.message);
+    return { ok: false, error: 'IndexedDB: ' + e.message };
   }
+
+  // v1.9.1 Fix #1: Cloud upsert dengan withTimeout (anti hang)
+  let cloudOk = false;
+  let cloudError = null;
+  try {
+    const { error } = await withTimeout(
+      supabase.from(VAULT_TABLE).upsert(row),
+      20000,
+      'share_vault_upsert'
+    );
+    if (error) {
+      cloudError = error.message;
+      console.error('[RecallFox/Share] Supabase error:', cloudError);
+      await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
+    } else {
+      cloudOk = true;
+      console.log('[RecallFox/Share] Cloud upsert OK:', itemId);
+    }
+  } catch (e) {
+    cloudError = e.message;
+    console.error('[RecallFox/Share] Cloud upsert exception:', cloudError);
+    await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
+  }
+
+  return {
+    ok: true,  // data SUDAH di IndexedDB
+    item: row,
+    synced: cloudOk,
+    localOnly: !cloudOk,
+    error: cloudError
+  };
 }
 
 /**
- * v1.9.0: Tampilkan preview modal untuk share data.
- * User lihat preview → klik Simpan → item dibuat → navigate vault.
- * User klik Batal → modal tutup.
+ * v1.9.1: Preview modal dengan input judul + auto-fetch page title.
  */
 export async function showSharePreviewModal(data, user) {
   console.log('[RecallFox/Share] Showing preview modal:', data);
 
-  // Extract URL dari text kalau tidak ada url field (Brave browser)
   let url = data.url || '';
   let text = data.text || '';
   let title = data.title || '';
 
+  // Extract URL dari text (Brave browser)
   if (!url && text) {
     try {
       const testUrl = new URL(text.trim());
@@ -119,13 +144,13 @@ export async function showSharePreviewModal(data, user) {
     } catch (e) {}
   }
 
-  // Tentukan tipe untuk label
+  // Tentukan tipe
   let typeLabel = '💬 Prompt';
   let typeIcon = '💬';
   if (url) { typeLabel = '🔗 Link'; typeIcon = '🔗'; }
   else if (text && text.length > 100) { typeLabel = '📋 Konteks'; typeIcon = '📋'; }
 
-  // Default title dari URL kalau kosong
+  // Default title dari hostname
   if (!title && url) {
     try { title = new URL(url).hostname; } catch (e) { title = url; }
   }
@@ -138,36 +163,37 @@ export async function showSharePreviewModal(data, user) {
   // Preview content
   let previewHtml = '';
   if (url) {
-    // URL preview — tampilkan sebagai link card
     let hostname = '';
     try { hostname = new URL(url).hostname; } catch (e) { hostname = url; }
     previewHtml = `
       <div style="background:#f5f5f4;border-radius:8px;padding:12px;margin-bottom:10px">
         <div style="font-size:11px;color:#a8a29e;margin-bottom:4px">${typeIcon} ${typeLabel}</div>
-        <div style="font-size:14px;font-weight:600;color:#1c1917;margin-bottom:4px">${escapeHtml(title || hostname)}</div>
         <div style="font-size:12px;color:#6366f1;word-break:break-all">${escapeHtml(url)}</div>
         ${text ? `<div style="font-size:12px;color:#57534e;margin-top:8px">${escapeHtml(text)}</div>` : ''}
       </div>`;
   } else if (text) {
-    // Text preview
     previewHtml = `
       <div style="background:#f5f5f4;border-radius:8px;padding:12px;margin-bottom:10px">
         <div style="font-size:11px;color:#a8a29e;margin-bottom:4px">${typeIcon} ${typeLabel}</div>
-        <div style="font-size:14px;font-weight:600;color:#1c1917;margin-bottom:4px">${escapeHtml(title || 'Teks')}</div>
-        <div style="font-size:12px;color:#57534e;white-space:pre-wrap;max-height:150px;overflow-y:auto">${escapeHtml(text)}</div>
-      </div>`;
-  } else if (title) {
-    previewHtml = `
-      <div style="background:#f5f5f4;border-radius:8px;padding:12px;margin-bottom:10px">
-        <div style="font-size:11px;color:#a8a29e;margin-bottom:4px">${typeIcon} ${typeLabel}</div>
-        <div style="font-size:14px;font-weight:600;color:#1c1917">${escapeHtml(title)}</div>
+        <div style="font-size:12px;color:#57534e;white-space:pre-wrap;max-height:120px;overflow-y:auto">${escapeHtml(text)}</div>
       </div>`;
   }
 
+  // v1.9.1 Fix #3: Tambah input judul + tombol auto-fetch
   modal.innerHTML = `
     <div style="background:#fff;border-radius:16px;max-width:380px;width:100%;padding:20px;box-shadow:0 20px 60px rgba(0,0,0,.3)">
       <div style="font-size:16px;font-weight:700;margin-bottom:12px;color:#1c1917">📥 Bagikan ke RecallFox</div>
+
+      <label style="display:block;font-size:12px;color:#57534e;margin:0 0 4px;font-weight:600">Judul</label>
+      <input id="shareTitleInput" type="text" value="${escapeHtml(title)}" placeholder="Ketik judul..."
+        style="width:100%;padding:10px 12px;border:1px solid #e7e5e4;border-radius:8px;font-size:14px;box-sizing:border-box;margin-bottom:6px">
+      <button id="shareAutoTitle" type="button"
+        style="background:none;border:none;color:#6d3df5;font-size:12px;padding:4px 0;cursor:pointer;display:block">
+        ✨ Ambil judul otomatis dari URL
+      </button>
+
       ${previewHtml}
+
       <div style="display:flex;gap:8px;margin-top:14px">
         <button id="shareCancel" style="flex:1;padding:10px;border:1px solid #e7e5e4;background:#fff;color:#57534e;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">Batal</button>
         <button id="shareSave" style="flex:1;padding:10px;background:#6d3df5;color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">Simpan ke Vault</button>
@@ -177,36 +203,78 @@ export async function showSharePreviewModal(data, user) {
 
   document.body.appendChild(modal);
 
-  // Wire buttons
+  const titleInput = modal.querySelector('#shareTitleInput');
+  const autoBtn = modal.querySelector('#shareAutoTitle');
   const cancelBtn = modal.querySelector('#shareCancel');
   const saveBtn = modal.querySelector('#shareSave');
 
+  // v1.9.1 Fix #3: Auto-fetch page title dari URL
+  autoBtn.addEventListener('click', async () => {
+    if (!url) return;
+    autoBtn.textContent = '⏳ Mengambil...';
+    autoBtn.disabled = true;
+    try {
+      const controller = new AbortController();
+      const t = setTimeout(() => controller.abort(), 8000);
+      const res = await fetch(url, { signal: controller.signal, mode: 'cors' });
+      clearTimeout(t);
+      const html = await res.text();
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const ogTitle = doc.querySelector('meta[property="og:title"]')?.content;
+      const docTitle = doc.querySelector('title')?.textContent;
+      const fetched = (ogTitle || docTitle || '').trim();
+      if (fetched) {
+        titleInput.value = fetched;
+        autoBtn.textContent = '✓ Judul otomatis terpasang';
+      } else {
+        autoBtn.textContent = '⚠ Judul tidak ditemukan, ketik manual';
+      }
+    } catch (e) {
+      autoBtn.textContent = '⚠ Gagal ambil (CORS?), ketik manual';
+    } finally {
+      autoBtn.disabled = false;
+      setTimeout(() => { autoBtn.textContent = '✨ Ambil judul otomatis dari URL'; }, 3000);
+    }
+  });
+
+  // v1.9.1 Fix #6: Cancel button kasih toast
   cancelBtn.addEventListener('click', () => {
     modal.remove();
+    showToast('Dibatalkan', false);
     console.log('[RecallFox/Share] User cancelled share');
   });
 
+  // v1.9.1 Fix #5: Tutup modal DULU, save di background, toast feedback
   saveBtn.addEventListener('click', async () => {
-    saveBtn.textContent = 'Menyimpan...';
-    saveBtn.disabled = true;
+    const finalTitle = (titleInput.value || '').trim() || title;
+
+    // Tutup modal dulu — app tetap normal
+    modal.remove();
+    showToast('⏳ Menyimpan...', false);
+
     try {
-      const result = await createShareItem(user, { title, text, url });
+      // v1.9.1 Fix #7: Outer timeout 25s
+      const result = await Promise.race([
+        createShareItem(user, { title: finalTitle, text, url }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Save timeout 25s')), 25000))
+      ]);
+
       if (result.ok) {
-        modal.remove();
         const typeLabel2 = result.item.type === 'link' ? '🔗 Link' : (result.item.type === 'context' ? '📋 Konteks' : '💬 Prompt');
-        showToast('✓ Tersimpan ke ' + typeLabel2 + ': ' + (result.item.title || 'Shared item'));
+        if (result.synced) {
+          showToast('✓ Tersimpan ke ' + typeLabel2 + ': ' + (result.item.title || 'Shared item'), false);
+        } else {
+          showToast('✓ Tersimpan lokal — sync cloud gagal: ' + (result.error || ''), true);
+        }
         // Navigate ke vault
         if (window.__rfNavigate) window.__rfNavigate('vault');
-        console.log('[RecallFox/Share] Saved and navigated to vault');
+        console.log('[RecallFox/Share] Saved:', result.item.id);
       } else {
         showToast('✗ Gagal: ' + result.error, true);
-        saveBtn.textContent = 'Coba Lagi';
-        saveBtn.disabled = false;
       }
     } catch (e) {
+      console.error('[RecallFox/Share] Save exception:', e.message);
       showToast('✗ Error: ' + e.message, true);
-      saveBtn.textContent = 'Coba Lagi';
-      saveBtn.disabled = false;
     }
   });
 
@@ -214,6 +282,7 @@ export async function showSharePreviewModal(data, user) {
   modal.addEventListener('click', (e) => {
     if (e.target === modal) {
       modal.remove();
+      showToast('Dibatalkan', false);
     }
   });
 }
@@ -224,24 +293,23 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// v1.9.1 Fix #4: Toast z-index 10000 (di atas modal 9999) + timer cleanup
 function showToast(msg, isError = false) {
   let t = document.getElementById('rfToast');
   if (!t) {
     t = document.createElement('div');
     t.id = 'rfToast';
-    t.className = 'toast';
     document.body.appendChild(t);
   }
   t.textContent = msg;
+  t.style.cssText = 'position:fixed;bottom:80px;left:50%;transform:translateX(-50%);padding:10px 20px;border-radius:8px;font-size:13px;font-weight:600;color:#fff;z-index:10000;transition:opacity .3s;max-width:90%;text-align:center;box-shadow:0 4px 20px rgba(0,0,0,.3)';
   t.style.background = isError ? '#ef4444' : '#10b981';
-  t.style.color = '#fff';
-  t.classList.add('show');
-  setTimeout(() => t.classList.remove('show'), 3000);
+  if (t._rfTimer) clearTimeout(t._rfTimer);
+  t.style.opacity = '1';
+  t._rfTimer = setTimeout(() => { t.style.opacity = '0'; }, 4000);
 }
 
-// Legacy: handleShareTarget dan processPendingShare — tidak dipakai di v1.9.0
-// main.js sekarang pakai showSharePreviewModal langsung.
-// Tetap export supaya tidak break import lama.
+// Legacy exports
 export async function handleShareTarget(url, navigateTo) {
   console.warn('[RecallFox/Share] handleShareTarget deprecated — use showSharePreviewModal');
   return { handled: false };
