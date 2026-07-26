@@ -11,6 +11,8 @@
 
 import { dbGetAllVaultItems, dbPutVaultItem, dbDeleteVaultItem } from '../db.js';
 import { deleteVaultItem, updateVaultItem } from '../sync.js';
+// v1.10.0: Folder ops — rename/archive/delete/move dengan guards anti-crash.
+import { renameFolder, archiveFolder, deleteFolder, moveFolder, cleanupOrphanFolders, findOrphanFolders } from '../lib/folder-ops.js';
 import {
   buildTree, isGroupItem, getParentId, setParentId,
   isPinned, setPinned
@@ -50,6 +52,7 @@ export function renderVault(user, onRefresh) {
       <div class="header-actions">
         <button class="icon-btn" id="vaultExpandAll" title="Buka semua folder">📂</button>
         <button class="icon-btn" id="vaultCollapseAll" title="Tutup semua folder">📁</button>
+        <button class="icon-btn" id="vaultCleanupBtn" title="Bersihkan folder orphan (bug tampil)">🧹</button>
         <button class="icon-btn" id="vaultBatchToggle" title="Mode batch">☑️</button>
         <button class="icon-btn" id="vaultRefreshBtn" title="Refresh">↻</button>
       </div>
@@ -89,6 +92,8 @@ export function renderVault(user, onRefresh) {
   // v1.9.6: Expand/Collapse all folders
   document.getElementById('vaultExpandAll').addEventListener('click', expandAllFolders);
   document.getElementById('vaultCollapseAll').addEventListener('click', collapseAllFolders);
+  // v1.10.0: Cleanup orphan folders — bersihkan folder yang parentId-nya invalid.
+  document.getElementById('vaultCleanupBtn').addEventListener('click', doCleanupOrphanFolders);
 
   const searchInput = document.getElementById('vaultSearch');
   searchInput.addEventListener('input', (e) => {
@@ -296,6 +301,14 @@ async function renderList() {
       });
     });
 
+    // v1.10.0: Folder menu (⋯) → bottom sheet dengan opsi Rename/Archive/Delete/Move
+    list.querySelectorAll('.folder-menu').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openFolderMenuSheet(btn.dataset.id);
+      });
+    });
+
     // v1.9.3: Folder as drop target (move item into folder via DnD)
     list.querySelectorAll('.vault-folder').forEach(folder => {
       folder.addEventListener('dragover', (e) => {
@@ -358,6 +371,7 @@ async function renderList() {
 
 // v1.8.0: Render tree node — group (folder) atau item biasa.
 // Indent dengan padding-left, no connector lines (mobile-friendly).
+// v1.10.0: Tambah tombol menu (⋯) di folder card untuk rename/hapus/arsip/pindah.
 function renderTreeNode(node, depth) {
   const indent = depth * 16;  // 16px per level
   if (node.kind === 'group') {
@@ -371,6 +385,7 @@ function renderTreeNode(node, depth) {
           ${isExpanded ? '📂' : '📁'} ${escapeHtml(folder.title || 'Folder')}
           <span class="folder-count">${childCount}</span>
         </div>
+        <button class="folder-menu" data-id="${folder.id}" title="Edit folder" aria-label="Edit folder">⋯</button>
       </div>
     `;
     if (isExpanded && node.children) {
@@ -423,6 +438,28 @@ function collapseAllFolders() {
   _lastUserToggleAt = Date.now();
   console.log('[RecallFox] Collapsed all folders');
   renderList();
+}
+
+// v1.10.0: Cleanup orphan folders — bersihkan folder yang parentId-nya menunjuk
+// ke folder yang sudah dihapus (bug tampil yang user maksud "folder ngotorin").
+// Aman: hanya set parentId=null, tidak hapus data.
+async function doCleanupOrphanFolders() {
+  showToast('🧹 Mencari folder orphan...');
+  const orphans = await findOrphanFolders();
+  if (orphans.length === 0) {
+    showToast('✓ Tidak ada folder orphan — vault sudah bersih');
+    return;
+  }
+  const names = orphans.map(o => `• ${o.title || o.id}`).join('\n');
+  if (!confirm(`Ditemukan ${orphans.length} folder orphan (bug tampil):\n\n${names}\n\nBersihkan? Folder akan dijadikan top-level (parentId=null). Data tidak dihapus.`)) return;
+  showToast('🧹 Membersihkan...');
+  const result = await cleanupOrphanFolders(window.__rfUser);
+  if (result.ok) {
+    showToast(`✓ ${result.cleanedCount} folder orphan dibersihkan`);
+    renderList();
+  } else {
+    showToast('✗ ' + (result.error || 'Gagal cleanup'));
+  }
 }
 
 // v1.9.6: Export helper untuk anti-race dengan polling di main.js
@@ -595,6 +632,227 @@ function openItemMenuSheet(itemId) {
           else if (action === 'delete') confirmDelete(itemId);
         }, 100);
       });
+    });
+  })();
+}
+
+// ============================================================
+// v1.10.0: Folder Menu Sheet — rename/archive/delete/move folder
+// Semua operasi pakai lib/folder-ops.js yang punya guards anti-crash.
+// ============================================================
+function openFolderMenuSheet(folderId) {
+  const sheet = document.createElement('div');
+  sheet.className = 'bottom-sheet';
+  sheet.innerHTML = `
+    <div class="sheet-backdrop"></div>
+    <div class="sheet-content">
+      <div class="sheet-handle"></div>
+      <div id="folderMenuBody">Memuat...</div>
+    </div>
+  `;
+  document.body.appendChild(sheet);
+  requestAnimationFrame(() => sheet.classList.add('open'));
+
+  const close = () => {
+    sheet.classList.remove('open');
+    setTimeout(() => sheet.remove(), 250);
+  };
+  sheet.querySelector('.sheet-backdrop').addEventListener('click', close);
+
+  (async () => {
+    const items = await dbGetAllVaultItems();
+    const folder = items.find(i => i.id === folderId && isGroupItem(i));
+    if (!folder) {
+      showToast('Folder tidak ditemukan');
+      close();
+      return;
+    }
+    // Hitung jumlah children (depth=1 saja untuk display)
+    const directChildren = items.filter(i => getParentId(i) === folderId);
+    const title = escapeHtml(truncateText(folder.title || 'Folder', 50));
+
+    const body = sheet.querySelector('#folderMenuBody');
+    body.innerHTML = `
+      <h3 style="margin-bottom:8px;font-size:15px">📁 ${title}</h3>
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:12px">${directChildren.length} item langsung di folder ini</div>
+      <button class="sheet-btn" data-action="rename">✏️ Ganti Nama</button>
+      <button class="sheet-btn" data-action="archive">📦 Arsipkan (folder + isi)</button>
+      <button class="sheet-btn" data-action="move">📂 Pindahkan ke Folder...</button>
+      <button class="sheet-btn" data-action="delete-keep" style="color:#d97706">🗑️ Hapus Folder (pertahankan isi)</button>
+      <button class="sheet-btn cancel" data-action="delete-all" style="color:#ef4444">⚠️ Hapus Folder + Semua Isi</button>
+      <button class="sheet-btn cancel" data-action="close">✕ Tutup</button>
+    `;
+
+    body.querySelectorAll('[data-action]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const action = btn.dataset.action;
+        close();
+        setTimeout(async () => {
+          if (action === 'rename') promptRenameFolder(folderId, folder.title);
+          else if (action === 'archive') doArchiveFolder(folderId);
+          else if (action === 'move') promptMoveFolder(folderId);
+          else if (action === 'delete-keep') doDeleteFolder(folderId, 'keep-children');
+          else if (action === 'delete-all') doDeleteFolder(folderId, 'delete-all');
+        }, 100);
+      });
+    });
+  })();
+}
+
+// v1.10.0: Prompt rename folder via inline modal (bukan prompt() native)
+function promptRenameFolder(folderId, currentName) {
+  const sheet = document.createElement('div');
+  sheet.className = 'bottom-sheet';
+  sheet.innerHTML = `
+    <div class="sheet-backdrop"></div>
+    <div class="sheet-content">
+      <div class="sheet-handle"></div>
+      <h3 style="margin-bottom:8px;font-size:15px">✏️ Ganti Nama Folder</h3>
+      <input type="text" id="renameInput" value="${escapeHtml(currentName || '')}" maxlength="100"
+        style="width:100%;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:14px;margin-bottom:12px;background:var(--surface);color:var(--text)">
+      <div style="display:flex;gap:8px">
+        <button class="sheet-btn cancel" data-action="cancel" style="flex:1">Batal</button>
+        <button class="sheet-btn" data-action="save" style="flex:1;background:var(--primary);color:#fff">Simpan</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(sheet);
+  requestAnimationFrame(() => {
+    sheet.classList.add('open');
+    const input = sheet.querySelector('#renameInput');
+    if (input) { input.focus(); input.select(); }
+  });
+
+  const close = () => {
+    sheet.classList.remove('open');
+    setTimeout(() => sheet.remove(), 250);
+  };
+  sheet.querySelector('.sheet-backdrop').addEventListener('click', close);
+
+  const doRename = async () => {
+    const newName = sheet.querySelector('#renameInput').value;
+    close();
+    setTimeout(async () => {
+      const result = await renameFolder(window.__rfUser, folderId, newName);
+      if (result.ok) {
+        showToast('✓ Folder di-rename');
+        renderList();
+      } else {
+        showToast('✗ ' + (result.error || 'Gagal rename'));
+      }
+    }, 100);
+  };
+
+  sheet.querySelector('[data-action="cancel"]').addEventListener('click', close);
+  sheet.querySelector('[data-action="save"]').addEventListener('click', doRename);
+  sheet.querySelector('#renameInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); doRename(); }
+    else if (e.key === 'Escape') { e.preventDefault(); close(); }
+  });
+}
+
+// v1.10.0: Archive folder + semua isinya
+async function doArchiveFolder(folderId) {
+  if (!confirm('Arsipkan folder dan semua isinya?\n\nItem tidak dihapus — bisa di-unarchive nanti di addon.')) return;
+  showToast('📦 Mengarsipkan...');
+  const result = await archiveFolder(window.__rfUser, folderId);
+  if (result.ok) {
+    showToast(`✓ Folder diarsipkan (${result.archivedCount} item)`);
+    renderList();
+  } else {
+    showToast('✗ ' + (result.error || 'Gagal arsip'));
+  }
+}
+
+// v1.10.0: Delete folder — 2 mode
+async function doDeleteFolder(folderId, mode) {
+  const msg = mode === 'delete-all'
+    ? '⚠️ HAPUS FOLDER + SEMUA ISI?\n\nIni tidak bisa dibatalkan. Semua item di dalam folder (termasuk sub-folder) akan dihapus permanen.'
+    : 'Hapus folder ini?\n\nIsi folder akan dipertahankan — item jadi top-level, sub-folder jadi folder root.';
+  if (!confirm(msg)) return;
+  showToast('🗑️ Menghapus...');
+  const result = await deleteFolder(window.__rfUser, folderId, mode);
+  if (result.ok) {
+    if (mode === 'delete-all') {
+      showToast(`✓ Folder + ${result.deletedCount} item dihapus`);
+    } else {
+      showToast(`✓ Folder dihapus (${result.unparentedCount} item jadi top-level)`);
+    }
+    renderList();
+  } else {
+    showToast('✗ ' + (result.error || 'Gagal hapus'));
+  }
+}
+
+// v1.10.0: Prompt pilih parent folder baru (move folder)
+function promptMoveFolder(folderId) {
+  (async () => {
+    const allItems = await dbGetAllVaultItems();
+    const folder = allItems.find(i => i.id === folderId);
+    if (!folder) return;
+    const currentParent = getParentId(folder);
+
+    // Ambil semua folder lain (exclude diri sendiri + descendants untuk anti-loop)
+    const allFolders = allItems.filter(i => isGroupItem(i) && !i.archived && i.id !== folderId);
+
+    const sheet = document.createElement('div');
+    sheet.className = 'bottom-sheet';
+    sheet.innerHTML = `
+      <div class="sheet-backdrop"></div>
+      <div class="sheet-content" style="max-height:80vh;overflow-y:auto">
+        <div class="sheet-handle"></div>
+        <h3 style="margin-bottom:8px;font-size:15px">📂 Pindahkan Folder</h3>
+        <button class="sheet-btn" data-action="root" style="${!currentParent ? 'background:var(--primary-soft);color:var(--primary)' : ''}">📁 Root (top-level) ${!currentParent ? '✓' : ''}</button>
+        <div id="folderListBody"></div>
+        <button class="sheet-btn cancel" data-action="close">✕ Tutup</button>
+      </div>
+    `;
+    document.body.appendChild(sheet);
+    requestAnimationFrame(() => sheet.classList.add('open'));
+
+    const close = () => {
+      sheet.classList.remove('open');
+      setTimeout(() => sheet.remove(), 250);
+    };
+    sheet.querySelector('.sheet-backdrop').addEventListener('click', close);
+    sheet.querySelector('[data-action="close"]').addEventListener('click', close);
+
+    const listBody = sheet.querySelector('#folderListBody');
+    if (allFolders.length === 0) {
+      listBody.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:12px;text-align:center">Belum ada folder lain</div>';
+    } else {
+      listBody.innerHTML = allFolders.map(f => {
+        const isCurrent = currentParent === f.id;
+        return `<button class="sheet-btn" data-folder-id="${f.id}" style="${isCurrent ? 'background:var(--primary-soft);color:var(--primary)' : ''}">📁 ${escapeHtml(f.title || 'Folder')} ${isCurrent ? '✓' : ''}</button>`;
+      }).join('');
+      listBody.querySelectorAll('[data-folder-id]').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const newParentId = btn.dataset.folderId;
+          close();
+          setTimeout(async () => {
+            const result = await moveFolder(window.__rfUser, folderId, newParentId);
+            if (result.ok) {
+              showToast('✓ Folder dipindahkan');
+              renderList();
+            } else {
+              showToast('✗ ' + (result.error || 'Gagal pindah'));
+            }
+          }, 100);
+        });
+      });
+    }
+
+    sheet.querySelector('[data-action="root"]').addEventListener('click', async () => {
+      close();
+      setTimeout(async () => {
+        const result = await moveFolder(window.__rfUser, folderId, null);
+        if (result.ok) {
+          showToast('✓ Folder dipindahkan ke root');
+          renderList();
+        } else {
+          showToast('✗ ' + (result.error || 'Gagal pindah'));
+        }
+      }, 100);
     });
   })();
 }
