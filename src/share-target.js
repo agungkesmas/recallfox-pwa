@@ -111,7 +111,10 @@ async function createShareItem(user, payload) {
  * @returns {Promise<{handled: boolean}>}
  */
 export async function handleShareTarget(url, navigateTo) {
+  // v1.8.8: Log lebih detail untuk debugging
+  console.log('[RecallFox/Share] handleShareTarget called. pathname:', url.pathname);
   if (!url.pathname.endsWith('/share-target') && !url.pathname.endsWith('/share-target/')) {
+    console.log('[RecallFox/Share] Not a share-target URL, skip');
     return { handled: false };
   }
 
@@ -120,33 +123,50 @@ export async function handleShareTarget(url, navigateTo) {
   const text = params.get('text') || '';
   const urlParam = params.get('url') || '';
 
-  // Strip hash dari url kalau ada (kadang browser tambah # di akhir)
-  const cleanUrl = urlParam ? urlParam.split('#')[0] : '';
+  // v1.8.8: Brave browser kadang kirim URL di 'text' field, bukan 'url' field.
+  // Cek kalau text berisi URL, extract sebagai url.
+  let cleanUrl = urlParam ? urlParam.split('#')[0] : '';
+  let cleanText = text;
+  if (!cleanUrl && text) {
+    // Cek apakah text adalah URL
+    try {
+      const testUrl = new URL(text.trim());
+      if (testUrl.protocol === 'http:' || testUrl.protocol === 'https:') {
+        cleanUrl = text.trim();
+        cleanText = '';
+        console.log('[RecallFox/Share] URL found in text field, extracted:', cleanUrl);
+      }
+    } catch (e) {
+      // text bukan URL, biarkan
+    }
+  }
 
-  console.log('[RecallFox/Share] Share target received:', { title, text: text?.slice(0, 50), url: cleanUrl });
+  console.log('[RecallFox/Share] Parsed:', { title, text: cleanText?.slice(0, 80), url: cleanUrl });
 
-  if (!title && !text && !cleanUrl) {
+  if (!title && !cleanText && !cleanUrl) {
     console.warn('[RecallFox/Share] Empty share — no title/text/url');
+    // v1.8.8: Jangan return error, tetap navigate ke vault supaya user tidak stuck
+    if (navigateTo) navigateTo('vault');
+    showShareToast('Share kosong — tidak ada data diterima');
     return { handled: true, error: 'empty_share' };
   }
 
   // Cek auth
   const session = await getSession();
   if (!session?.user) {
-    // Belum login → simpan pending share ke sessionStorage, proses setelah login
-    sessionStorage.setItem('rf_pending_share', JSON.stringify({ title, text, url: cleanUrl }));
+    sessionStorage.setItem('rf_pending_share', JSON.stringify({ title, text: cleanText, url: cleanUrl }));
     console.log('[RecallFox/Share] Not logged in — saved pending share, redirect to login');
+    showShareToast('Silakan login dulu — share akan diproses otomatis');
     return { handled: true, pendingLogin: true };
   }
 
   // Sudah login → proses share
-  const result = await createShareItem(session.user, { title, text, url: cleanUrl });
+  const result = await createShareItem(session.user, { title, text: cleanText, url: cleanUrl });
   if (result.ok) {
-    console.log('[RecallFox/Share] Item saved:', result.item.id);
-    // Navigate ke vault supaya user lihat item baru
+    console.log('[RecallFox/Share] Item saved:', result.item.id, 'type:', result.item.type);
     if (navigateTo) navigateTo('vault');
-    // Toast konfirmasi
-    showShareToast('✓ Tersimpan ke vault: ' + (result.item.title || 'Shared item'));
+    const typeLabel = result.item.type === 'link' ? '🔗 Link' : (result.item.type === 'context' ? '📋 Konteks' : '💬 Prompt');
+    showShareToast('✓ Tersimpan ke ' + typeLabel + ': ' + (result.item.title || 'Shared item'));
     return { handled: true, item: result.item };
   } else {
     console.error('[RecallFox/Share] Save failed:', result.error);
