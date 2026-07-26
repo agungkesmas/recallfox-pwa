@@ -146,6 +146,21 @@ async function renderList() {
     // Include group items untuk tree rendering
     let groupItems = allItems.filter(i => isGroupItem(i) && !i.archived);
 
+    // v1.10.1: Hapus folder "Builder" yang ngotori PWA (user request).
+    // Cloud punya 0 isGroup items. "Builder" folder hanya ada di IndexedDB PWA
+    // (artifact dari bug lama). Hapus dari IndexedDB — bukan dari cloud.
+    const builderFolders = groupItems.filter(g =>
+      (g.title || '').toLowerCase().trim() === 'builder'
+    );
+    if (builderFolders.length > 0) {
+      console.warn('[RecallFox] Cleaning up "Builder" folder(s) from IndexedDB:', builderFolders.map(g => g.id));
+      for (const g of builderFolders) {
+        await dbDeleteVaultItem(g.id);
+      }
+      groupItems = groupItems.filter(g => (g.title || '').toLowerCase().trim() !== 'builder');
+      console.log('[RecallFox] Cleaned', builderFolders.length, 'Builder folder(s)');
+    }
+
     // v1.9.6 FIX BUG "2 folder Builder duplikat":
     // Cloud hanya 1 folder "Builder" (verified), tapi IndexedDB PWA bisa punya duplikat
     // karena bug sync_queue retry atau cache lama. Dedup by (user_id + title lowercase).
