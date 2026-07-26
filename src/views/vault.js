@@ -10,7 +10,7 @@
 //   4. State update instan: dbPutVaultItem langsung + updateVaultItem cloud, renderList() (bukan reload)
 
 import { dbGetAllVaultItems, dbPutVaultItem, dbDeleteVaultItem } from '../db.js';
-import { deleteVaultItem, updateVaultItem, createNote } from '../sync.js';
+import { deleteVaultItem, updateVaultItem } from '../sync.js';
 // v1.10.0: Folder ops — rename/archive/delete/move dengan guards anti-crash.
 import { renameFolder, archiveFolder, deleteFolder, moveFolder, cleanupOrphanFolders, findOrphanFolders } from '../lib/folder-ops.js';
 import {
@@ -1279,6 +1279,10 @@ function openEditAnnotationSheet(itemId) {
 }
 
 // v1.10.3: Buat folder baru — dipanggil dari FAB menu atau vault header
+// v1.10.4 FIX: Pakai supabase.upsert (bukan updateVaultItem yang UPDATE).
+//   Sebelumnya: updateVaultItem → Supabase UPDATE pada row yang belum ada → silent fail.
+//   Folder tidak sync ke cloud. Error toast muncul. Duplicate karena user klik 2x.
+//   Sekarang: supabase.upsert(row) → INSERT baru ke cloud. IndexedDB DULU (instan).
 export async function handleCreateFolder() {
   const name = prompt('Nama folder baru:');
   if (!name || !name.trim()) return;
@@ -1286,20 +1290,38 @@ export async function handleCreateFolder() {
   const folderType = (_filterType && _filterType !== 'all') ? _filterType : 'prompt';
   const folder = createGroup(name.trim(), folderType);
   try {
-    // Save ke IndexedDB + cloud (pola sama dengan addon handleAddGroup)
+    // Step 1: IndexedDB DULU — user langsung lihat folder (instan)
     await dbPutVaultItem(folder);
-    await updateVaultItem(window.__rfUser, folder.id, {
-      title: folder.title,
-      type: folder.type,
-      tags: folder.tags,
-      source: folder.source
-    });
-    // Auto-expand folder baru
     _expandedFolderIds.add(folder.id);
     showToast('✓ Folder "' + name.trim() + '" dibuat');
     renderList();
+
+    // Step 2: Cloud upsert (async, tidak block UI)
+    // Pakai supabase.upsert BUKAN updateVaultItem (yang UPDATE — tidak insert row baru)
+    (async () => {
+      try {
+        const { supabase, VAULT_TABLE } = await import('../supabase.js');
+        const { withTimeout } = await import('../sync.js');
+        const { error } = await withTimeout(
+          supabase.from(VAULT_TABLE).upsert(folder),
+          15000,
+          'folder_upsert'
+        );
+        if (error) {
+          console.warn('[RecallFox] Folder cloud upsert error:', error.message);
+          // Enqueue untuk retry
+          const { dbEnqueueSync } = await import('../db.js');
+          await dbEnqueueSync({ op: 'upsert_vault', user_id: window.__rfUser.id, row: folder });
+        } else {
+          console.log('[RecallFox] Folder cloud upsert OK:', folder.id);
+        }
+      } catch (e) {
+        console.warn('[RecallFox] Folder cloud upsert failed:', e.message);
+        const { dbEnqueueSync } = await import('../db.js');
+        await dbEnqueueSync({ op: 'upsert_vault', user_id: window.__rfUser.id, row: folder });
+      }
+    })();
   } catch (e) {
-    // Fallback: coba createNote (yang sudah ada di sync.js)
     console.error('[RecallFox] createFolder error:', e);
     showToast('Gagal buat folder: ' + e.message);
   }

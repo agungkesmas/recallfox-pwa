@@ -18,8 +18,7 @@ import { renderLogin } from './views/login.js';
 import { renderMedia, startCaptureFlow, startDocumentFlow } from './views/media.js';
 import { renderNotes, openNoteEditor } from './views/notes.js';
 import { renderSettings } from './views/settings.js';
-import { renderVault, isUserTogglingFolders } from './views/vault.js';
-import { handleCreateFolder } from './views/vault.js';
+import { renderVault, isUserTogglingFolders, handleCreateFolder } from './views/vault.js';
 import { showSharePreviewModal } from './share-target.js';  // v1.9.0
 
 let _currentView = 'media';

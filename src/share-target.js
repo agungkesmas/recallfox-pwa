@@ -250,47 +250,36 @@ export async function showSharePreviewModal(data, user) {
     console.log('[RecallFox/Share] User cancelled share');
   });
 
-  // v1.9.1 Fix #5: Tutup modal DULU, save di background, toast feedback
-  // v1.9.2: JANGAN navigateTo('vault') setelah save — itu root cause "memuat terus"
+  // v1.10.4 FIX: Tutup modal INSTAN saat user klik Simpan.
+  // Sebelumnya: modal tetap tampil selama save (bisa 25 detik) → user tidak bisa
+  // interaksi → terasa "hang/blank". Sekarang: modal tutup langsung, toast
+  // "Menyimpan..." muncul, save di background, toast sukses/error setelah selesai.
   saveBtn.addEventListener('click', async () => {
     const finalTitle = (titleInput.value || '').trim() || title;
 
-    // Disable button supaya tidak double-click
-    saveBtn.disabled = true;
-    saveBtn.textContent = '⏳ Menyimpan...';
-    cancelBtn.disabled = true;
+    // TUTUP MODAL INSTAN — user bisa langsung interaksi dengan app
+    modal.remove();
+    showToast('⏳ Menyimpan...', false);
 
     try {
-      // v1.9.1 Fix #7: Outer timeout 25s
       const result = await Promise.race([
         createShareItem(user, { title: finalTitle, text, url }),
         new Promise((_, rej) => setTimeout(() => rej(new Error('Save timeout 25s')), 25000))
       ]);
 
-      // Tutup modal DULU setelah save berhasil
-      modal.remove();
-
       if (result.ok) {
         const typeLabel2 = result.item.type === 'link' ? '🔗 Link' : (result.item.type === 'context' ? '📋 Konteks' : '💬 Prompt');
-        // v1.9.2: Toast sukses 6 detik + clickable "Lihat di Vault"
-        // TIDAK auto-navigate. User kontrol sendiri.
         if (result.synced) {
           showSuccessToast('✓ Tersimpan ke ' + typeLabel2, 'Lihat di Vault');
         } else {
-          // Local-only (cloud gagal) — sync_queue akan retry
           showSuccessToast('✓ Tersimpan lokal (sync nanti)', 'Lihat di Vault');
         }
         console.log('[RecallFox/Share] Saved:', result.item.id, 'synced:', result.synced);
       } else {
         showToast('✗ Gagal: ' + result.error, true);
-        // Re-enable button supaya user bisa retry
-        saveBtn.disabled = false;
-        saveBtn.textContent = 'Simpan ke Vault';
-        cancelBtn.disabled = false;
       }
     } catch (e) {
       console.error('[RecallFox/Share] Save exception:', e.message);
-      modal.remove();
       showToast('✗ Error: ' + e.message, true);
     }
   });
