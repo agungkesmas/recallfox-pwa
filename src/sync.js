@@ -1008,13 +1008,12 @@ export async function pullFromCloud(user) {
     // Hapus lokal yang tidak ada di cloud
     for (const li of localItems) {
       if (!cloudIds.has(li.id) && li.user_id === user.id) {
-        const isOwnDevice = li.device_id === currentDeviceId;
-        // v1.2.0: JANGAN hapus item yang dibuat di device ini sendiri.
-        //         Mungkin item baru dibuat tapi upsert Supabase gagal → masih di queue
-        //         retry. Kalau dihapus, user kehilangan data yang baru dibuat.
-        if (isOwnDevice) {
-          continue;
-        }
+        // v1.8.4: HAPUS isOwnDevice check — itu bikin deletion tidak propagate cross-device.
+        //   Sebelumnya: item yang dibuat di PWA tidak dihapus meski sudah di-hard-delete di cloud
+        //   via addon. User: "aku menghapus media tersisa dua tapi di pwa masih banyak."
+        //   Sekarang: hanya 60s grace period (sama seperti addon pullFromSupabaseV33).
+        //   60s cukup untuk retry queue jalan — kalau masih belum sync setelah 60s, biarkan
+        //   sync_queue yang handle re-push.
         const createdAt = new Date(li.created_at || 0).getTime();
         if (now - createdAt > 60000) {
           await dbDeleteVaultItem(li.id);
@@ -1057,11 +1056,7 @@ export async function pullFromCloud(user) {
     const now = Date.now();
     for (const ln of localNotes) {
       if (!cloudIds.has(ln.id) && ln.user_id === user.id) {
-        const isOwnDevice = ln.device_id === currentDeviceId;
-        // v1.2.0: JANGAN hapus note yang dibuat di device ini sendiri.
-        if (isOwnDevice) {
-          continue;
-        }
+        // v1.8.4: HAPUS isOwnDevice check — sama seperti vault items fix.
         const createdAt = new Date(ln.created_at || 0).getTime();
         if (now - createdAt > 60000) {
           await dbDeleteNote(ln.id);
