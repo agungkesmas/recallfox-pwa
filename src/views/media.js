@@ -479,6 +479,15 @@ export async function startCaptureFlow(source, onDone) {
   }
   if (!picked) return;
 
+  // v1.8.2: GPS indicator — kasih tahu user apakah GPS tercatat
+  if (picked.location && picked.location.address) {
+    showToast('📍 GPS: ' + picked.location.address.slice(0, 40));
+  } else if (picked.location && picked.location.lat != null) {
+    showToast('📍 GPS: ' + picked.location.lat.toFixed(4) + ', ' + picked.location.lng.toFixed(4));
+  } else {
+    showToast('⚠️ GPS tidak tersedia (izinkan akses lokasi)');
+  }
+
   // Buka annotate editor
   let annoRes;
   try {
@@ -491,6 +500,13 @@ export async function startCaptureFlow(source, onDone) {
   if (annoRes.cancelled) return;
 
   const finalDataUrl = annoRes.dataUrl;
+
+  // v1.8.2: Prompt nama file (sama seperti document flow yang punya form nama)
+  const defaultTitle = `HP Capture ${new Date().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}`;
+  const userTitle = prompt('Nama file:', defaultTitle);
+  if (userTitle === null) return; // user cancel
+  const finalTitle = userTitle.trim() || defaultTitle;
+
   showToast('Menyimpan...');
 
   // Pastikan user masih login
@@ -505,8 +521,9 @@ export async function startCaptureFlow(source, onDone) {
       width: picked.width,
       height: picked.height,
       mode: 'selection',
-      title: `HP Capture ${new Date().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}`,
-      annotationNote: annoRes.annotationNote
+      title: finalTitle,
+      annotationNote: annoRes.annotationNote,
+      location: picked.location || null  // v1.8.2: PASS location ke sync
     });
     console.log('[RecallFox] createScreenshotItem result:', res);
     // v1.2.0: Toast akurat berdasarkan status sync
@@ -550,6 +567,15 @@ export async function startDocumentFlow(source, onDone) {
   }
   if (!picked) return;
 
+  // v1.8.2: GPS indicator untuk document flow juga
+  if (picked.location && picked.location.address) {
+    showToast('📍 GPS: ' + picked.location.address.slice(0, 40));
+  } else if (picked.location && picked.location.lat != null) {
+    showToast('📍 GPS: ' + picked.location.lat.toFixed(4) + ', ' + picked.location.lng.toFixed(4));
+  } else {
+    showToast('⚠️ GPS tidak tersedia (izinkan akses lokasi)');
+  }
+
   // v1.4.0: Buka multi-page document editor (Fase 4-5: auto-detect + batch)
   let docRes;
   try {
@@ -572,7 +598,8 @@ export async function startDocumentFlow(source, onDone) {
     const res = await createDocumentItemMultiPage(window.__rfUser, {
       pages: docRes.pages,
       title: docRes.title,
-      note: docRes.note
+      note: docRes.note,
+      location: picked.location || null  // v1.8.2: PASS location ke sync
     });
     console.log('[RecallFox] createDocumentItemMultiPage result:', res);
     if (res.ok) {
