@@ -726,6 +726,31 @@
   font-weight: 600;
   margin-left: auto;
 }
+/* v1.10.0: Folder menu button (⋯) — edit folder (rename/archive/delete/move) */
+.folder-menu {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted, #6b7280);
+  font-size: 18px;
+  font-weight: 700;
+  cursor: pointer;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  line-height: 1;
+  transition: background .15s, color .15s;
+}
+.folder-menu:hover {
+  background: var(--bg, #fafaf9);
+  color: var(--text, #1c1917);
+}
+.folder-menu:active {
+  transform: scale(0.92);
+}
 .item-location {
   font-size: 11px;
   color: var(--text-muted, #6b7280);
