@@ -18,7 +18,7 @@ import { renderLogin } from './views/login.js';
 import { renderMedia, startCaptureFlow, startDocumentFlow } from './views/media.js';
 import { renderNotes, openNoteEditor } from './views/notes.js';
 import { renderSettings } from './views/settings.js';
-import { renderVault } from './views/vault.js';
+import { renderVault, isUserTogglingFolders } from './views/vault.js';
 import { showSharePreviewModal } from './share-target.js';  // v1.9.0
 
 let _currentView = 'media';
@@ -143,8 +143,13 @@ async function showApp(user) {
 
   if (!_realtimeBound) {
     subscribeRealtime(user, () => {
+      // v1.9.6: Anti-race — kalau user baru saja toggle folder, skip re-render
       if (_currentView === 'media' || _currentView === 'vault' || _currentView === 'notes') {
-        navigateTo(_currentView);
+        if (_currentView === 'vault' && isUserTogglingFolders()) {
+          console.log('[RecallFox] Realtime skip re-render vault (user toggling folders)');
+        } else {
+          navigateTo(_currentView);
+        }
       }
     });
     _realtimeBound = true;
@@ -173,8 +178,14 @@ function startPolling(user) {
       if ((vaultRes.data?.length > 0) || (notesRes.data?.length > 0)) {
         await pullFromCloud(user);
         _lastPullAt = Date.now();
+        // v1.9.6: Anti-race — kalau user baru saja toggle folder (< 2s),
+        // skip re-render supaya tidak override visual expand/collapse state.
         if (_currentView === 'media' || _currentView === 'vault' || _currentView === 'notes') {
-          navigateTo(_currentView);
+          if (_currentView === 'vault' && isUserTogglingFolders()) {
+            console.log('[RecallFox] Polling skip re-render vault (user toggling folders)');
+          } else {
+            navigateTo(_currentView);
+          }
         }
       }
     } catch (e) {}

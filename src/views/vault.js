@@ -9,7 +9,7 @@
 //   3. DnD dengan auto-scroll saat drag ke tepi atas/bawah
 //   4. State update instan: dbPutVaultItem langsung + updateVaultItem cloud, renderList() (bukan reload)
 
-import { dbGetAllVaultItems, dbPutVaultItem } from '../db.js';
+import { dbGetAllVaultItems, dbPutVaultItem, dbDeleteVaultItem } from '../db.js';
 import { deleteVaultItem, updateVaultItem } from '../sync.js';
 import {
   buildTree, isGroupItem, getParentId, setParentId,
@@ -26,6 +26,9 @@ let _expandedFolderIds = new Set();  // v1.8.0: folder yang di-expand
 let _currentFolderId = null;  // v1.8.0: null = root, atau folder id untuk breadcrumb navigation
 let _lastRenderToken = null;  // v1.9.2: token untuk detect renderList race condition
 let _dndAutoScrollTimer = null;  // v1.9.3: timer untuk auto-scroll saat DnD
+let _lastUserToggleAt = 0;  // v1.9.6: timestamp toggle folder terakhir (anti race dengan polling)
+const USER_TOGGLE_GRACE_MS = 2000;  // polling skip re-render kalau < 2s setelah user toggle
+let _firstRenderDone = false;  // v1.9.6: flag untuk auto-expand folder di first render
 
 const TYPE_LABELS = {
   prompt: { label: 'Prompt', icon: '💬', color: '#10a37f' },
@@ -45,6 +48,8 @@ export function renderVault(user, onRefresh) {
     <div class="view-header">
       <h2>🗂️ Vault</h2>
       <div class="header-actions">
+        <button class="icon-btn" id="vaultExpandAll" title="Buka semua folder">📂</button>
+        <button class="icon-btn" id="vaultCollapseAll" title="Tutup semua folder">📁</button>
         <button class="icon-btn" id="vaultBatchToggle" title="Mode batch">☑️</button>
         <button class="icon-btn" id="vaultRefreshBtn" title="Refresh">↻</button>
       </div>
@@ -81,6 +86,9 @@ export function renderVault(user, onRefresh) {
   document.getElementById('vaultBatchCancel').addEventListener('click', () => exitBatchMode());
   document.getElementById('vaultBatchCopy').addEventListener('click', () => doBatchCopy());
   document.getElementById('vaultBatchDelete').addEventListener('click', () => doBatchDelete());
+  // v1.9.6: Expand/Collapse all folders
+  document.getElementById('vaultExpandAll').addEventListener('click', expandAllFolders);
+  document.getElementById('vaultCollapseAll').addEventListener('click', collapseAllFolders);
 
   const searchInput = document.getElementById('vaultSearch');
   searchInput.addEventListener('input', (e) => {
@@ -131,8 +139,66 @@ async function renderList() {
     // v1.8.0: Filter TEXT_TYPES + folder groups (isGroup). Folder groups punya source.isGroup=true.
     let items = allItems.filter(i => TEXT_TYPES.includes(i.type) && !i.archived);
     // Include group items untuk tree rendering
-    const groupItems = allItems.filter(i => isGroupItem(i) && !i.archived);
+    let groupItems = allItems.filter(i => isGroupItem(i) && !i.archived);
+
+    // v1.9.6 FIX BUG "2 folder Builder duplikat":
+    // Cloud hanya 1 folder "Builder" (verified), tapi IndexedDB PWA bisa punya duplikat
+    // karena bug sync_queue retry atau cache lama. Dedup by (user_id + title lowercase).
+    // Keep folder dengan createdAt terbaru (paling baru dibuat), hapus yang lain dari IndexedDB.
+    if (groupItems.length > 0) {
+      const seen = new Map();  // key: user_id + '|' + title_lowercase → item
+      const duplicates = [];
+      for (const g of groupItems) {
+        const key = (g.user_id || '') + '|' + (g.title || '').toLowerCase().trim();
+        const existing = seen.get(key);
+        if (!existing) {
+          seen.set(key, g);
+        } else {
+          // Bandingkan createdAt — keep yang terbaru
+          const existingDate = new Date(existing.created_at || existing.createdAt || 0);
+          const newDate = new Date(g.created_at || g.createdAt || 0);
+          if (newDate > existingDate) {
+            duplicates.push(existing);
+            seen.set(key, g);
+          } else {
+            duplicates.push(g);
+          }
+        }
+      }
+      if (duplicates.length > 0) {
+        console.warn('[RecallFox] Found ' + duplicates.length + ' duplicate folder(s), cleaning up:', duplicates.map(d => ({ id: d.id, title: d.title })));
+        // Cleanup IndexedDB: hapus duplikat (JANGAN hapus dari cloud — bisa jadi cloud-nya OK)
+        for (const dup of duplicates) {
+          try { await dbDeleteVaultItem(dup.id); } catch (e) {}
+        }
+        // Re-filter groupItems tanpa duplikat
+        const dupIds = new Set(duplicates.map(d => d.id));
+        groupItems = groupItems.filter(g => !dupIds.has(g.id));
+      }
+    }
+
     items = [...items, ...groupItems];
+
+    // v1.9.6 FIX BUG "folder tidak bisa dibuka":
+    // Auto-expand folder yang punya children di first render — supaya user
+    // langsung lihat isinya tanpa perlu klik. Mencegah kondisi "folder kosong"
+    // padahal sebenarnya punya children tapi collapse.
+    if (!_firstRenderDone && groupItems.length > 0) {
+      // Build map parentId → count children
+      const childCountByParent = new Map();
+      for (const it of items) {
+        const pid = getParentId(it);
+        if (pid) childCountByParent.set(pid, (childCountByParent.get(pid) || 0) + 1);
+      }
+      // Auto-expand folder yang punya children
+      for (const g of groupItems) {
+        if ((childCountByParent.get(g.id) || 0) > 0) {
+          _expandedFolderIds.add(g.id);
+        }
+      }
+      _firstRenderDone = true;
+      console.log('[RecallFox] Auto-expanded folders with children:', Array.from(_expandedFolderIds));
+    }
 
     // Filter by type (hanya untuk non-group items)
     if (_filterType !== 'all') {
@@ -321,13 +387,49 @@ function renderTreeNode(node, depth) {
 }
 
 // v1.8.0: Toggle folder expand/collapse
+// v1.9.6: Tambah logging + set _lastUserToggleAt untuk anti-race dengan polling
 function toggleFolder(folderId) {
-  if (_expandedFolderIds.has(folderId)) {
+  if (!folderId) {
+    console.warn('[RecallFox] toggleFolder: no folderId');
+    return;
+  }
+  const wasExpanded = _expandedFolderIds.has(folderId);
+  if (wasExpanded) {
     _expandedFolderIds.delete(folderId);
   } else {
     _expandedFolderIds.add(folderId);
   }
+  _lastUserToggleAt = Date.now();
+  console.log('[RecallFox] toggleFolder:', folderId, '→', wasExpanded ? 'collapsed' : 'expanded', '— expanded set:', Array.from(_expandedFolderIds));
   renderList();
+}
+
+// v1.9.6: Expand all folders
+function expandAllFolders() {
+  // Ambil semua folder id dari IndexedDB
+  (async () => {
+    const allItems = await dbGetAllVaultItems();
+    const groupItems = allItems.filter(i => isGroupItem(i) && !i.archived);
+    groupItems.forEach(g => _expandedFolderIds.add(g.id));
+    _lastUserToggleAt = Date.now();
+    console.log('[RecallFox] Expanded all folders:', Array.from(_expandedFolderIds));
+    renderList();
+  })();
+}
+
+// v1.9.6: Collapse all folders
+function collapseAllFolders() {
+  _expandedFolderIds.clear();
+  _lastUserToggleAt = Date.now();
+  console.log('[RecallFox] Collapsed all folders');
+  renderList();
+}
+
+// v1.9.6: Export helper untuk anti-race dengan polling di main.js
+// main.js polling 10s akan cek ini sebelum re-render vault — kalau user
+// baru saja toggle folder, skip re-render supaya tidak override visual state.
+export function isUserTogglingFolders() {
+  return (Date.now() - _lastUserToggleAt) < USER_TOGGLE_GRACE_MS;
 }
 
 function renderItemCard(item, indent = 0) {
