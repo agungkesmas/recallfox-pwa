@@ -27,6 +27,7 @@ let _pollTimer = null;
 let _retryTimer = null;
 let _lastPullAt = 0;
 let _skipPullOnBoot = false;  // v1.9.2: true kalau share-target detected
+let _appRendered = false;  // v1.10.5: guard — showApp hanya boleh dipanggil sekali
 const POLL_INTERVAL_MS = 10000;
 const RETRY_INTERVAL_MS = 30000;
 
@@ -81,7 +82,11 @@ async function init() {
 
   onAuthChange(async (user) => {
     if (user) {
-      await showApp(user);
+      // v1.10.5: JANGAN showApp lagi kalau sudah dirender (init sudah panggil).
+      // Sebelumnya: onAuthChange fire setelah init → showApp 2x → duplicate event listeners.
+      if (!_appRendered) {
+        await showApp(user);
+      }
       // v1.9.0: Cek pending share setelah login
       const pending = sessionStorage.getItem('rf_pending_share');
       if (pending) {
@@ -111,6 +116,7 @@ async function init() {
 
 function showLogin() {
   window.__rfUser = null;
+  _appRendered = false;  // v1.10.5: reset guard supaya showApp bisa jalan lagi setelah re-login
   stopPolling();
   stopRetryQueue();
   unsubscribeRealtime();
@@ -122,6 +128,16 @@ function showLogin() {
 }
 
 async function showApp(user) {
+  // v1.10.5: Guard — showApp hanya boleh dipanggil sekali per session.
+  // Sebelumnya: init() + onAuthChange keduanya panggil showApp → renderShell 2x
+  // → FAB event listener bound 2x → klik FAB = buka sheet 2x = handleCreateFolder 2x
+  // = 2 folder tercipta. Juga polling/realtime double-bind.
+  if (_appRendered) {
+    console.log('[RecallFox] showApp already rendered — skip duplicate');
+    return;
+  }
+  _appRendered = true;
+
   window.__rfUser = user;
   renderShell(user);
   navigateTo(_currentView);
