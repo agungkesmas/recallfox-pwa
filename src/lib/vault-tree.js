@@ -55,10 +55,12 @@ export function setPinned(item, pinned) {
 
 // ===== Create group =====
 
-export function createGroup(name, type) {
+export function createGroup(name, type, userId) {
+  const now = new Date().toISOString();
   const id = 'grp_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
   return {
     id,
+    user_id: userId || null,  // v1.10.6: WAJIB untuk Supabase upsert
     type: type || 'prompt',
     title: name || 'Grup Baru',
     body: '',
@@ -67,15 +69,29 @@ export function createGroup(name, type) {
     source: {
       isGroup: true,
       groupType: type || 'prompt',
-      capturedAt: new Date().toISOString(),
-      device: 'addon'
+      capturedAt: now,
+      device: 'pwa'
     },
+    link_url: null,
+    link_title: null,
     favorite: false,
     archived: false,
-    useCount: 0,
-    lastUsedAt: null,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    use_count: 0,           // snake_case untuk Supabase
+    last_used_at: null,
+    screenshot_mode: null,
+    screenshot_width: 0,
+    screenshot_height: 0,
+    screenshot_format: null,
+    screenshot_bytes: 0,
+    thumbnail_data_url: null,
+    gdrive_file_id: null,
+    gdrive_file_url: null,
+    toppings: [],
+    variables: [],
+    created_at: now,         // snake_case untuk Supabase
+    updated_at: now,
+    deleted_at: null,
+    device_id: 'pwa'
   };
 }
 

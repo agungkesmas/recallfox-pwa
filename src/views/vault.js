@@ -1288,7 +1288,8 @@ export async function handleCreateFolder() {
   if (!name || !name.trim()) return;
   // Type folder = filter type yang aktif (atau 'prompt' default)
   const folderType = (_filterType && _filterType !== 'all') ? _filterType : 'prompt';
-  const folder = createGroup(name.trim(), folderType);
+  // v1.10.6: Pass userId ke createGroup supaya row punya user_id (wajib untuk Supabase)
+  const folder = createGroup(name.trim(), folderType, window.__rfUser?.id);
   try {
     // Step 1: IndexedDB DULU — user langsung lihat folder (instan)
     await dbPutVaultItem(folder);
