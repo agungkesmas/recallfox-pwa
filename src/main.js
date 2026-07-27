@@ -285,7 +285,7 @@ function openFabMenu() {
     sheet.remove();
     if (action === 'camera') startCaptureFlow('camera');
     else if (action === 'gallery') startCaptureFlow('gallery');
-    else if (action === 'document') startDocumentFlow();
+    else if (action === 'document') startDocumentFlow('camera');
     else if (action === 'paste') startCaptureFlow('paste');
     else if (action === 'note') { navigateTo('notes'); setTimeout(openNoteEditor, 100); }
     else if (action === 'folder') { navigateTo('vault'); setTimeout(() => handleCreateFolder(), 100); }

@@ -88,6 +88,11 @@ export function openAnnotateEditor(dataUrl, opts = {}) {
     const textInput = overlay.querySelector('.rf-anno-text-input');
     const noteInput = overlay.querySelector('.rf-anno-note-input');
     const titleInput = overlay.querySelector('.rf-anno-title-input');
+    // v1.11.2: Saat user klik/fokus title input, select semua teks supaya bisa langsung ditimpa.
+    //   User: "perilaku rename file ketika di klik harusnya dalam posisi terblok agar bisa langsung ditimpa."
+    titleInput.addEventListener('focus', () => {
+      setTimeout(() => titleInput.select(), 0);
+    });
     const bgCtx = bgCanvas.getContext('2d');
     const drawCtx = drawCanvas.getContext('2d');
     const previewCtx = previewCanvas.getContext('2d');
