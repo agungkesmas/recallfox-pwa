@@ -25,6 +25,13 @@ import {
   dbGetScreenshotBlob, dbPutScreenshotBlob, dbDeleteScreenshotBlob,
   dbEnqueueSync, dbGetSyncQueue, dbDeleteSyncQueueItem
 } from './db.js';
+// v1.11.0: Delete registry — lock item yang sudah dihapus supaya tidak re-appear.
+import {
+  addToDeleteRegistry, addNoteToDeleteRegistry,
+  isInDeleteRegistry, isNoteInDeleteRegistry,
+  removeFromDeleteRegistry, removeNoteFromDeleteRegistry,
+  cleanupDeleteRegistry, getDeletedItemIds, getDeletedNoteIds
+} from './lib/delete-registry.js';
 
 const SCREENSHOTS_TABLE = 'screenshots';
 
@@ -515,10 +522,23 @@ export async function createScreenshotItem(user, payload) {
 
 export async function deleteVaultItem(user, itemId) {
   if (!user || !itemId) return { ok: false, error: 'invalid_args' };
+
+  // v1.11.0: Tambah ke delete registry DULU sebelum hard-delete cloud.
+  // Supaya: (a) pull berikutnya tidak re-add item ini kalau device lain push ulang,
+  //         (b) processSyncQueue skip upsert_vault untuk item ini.
+  // Root cause bug "item muncul kembali setelah dihapus": device lain masih punya
+  // item di lokal + push ke cloud → cloud punya item lagi → PWA pull → re-add.
+  // Delete registry lock: item yang ada di registry TIDAK akan di-re-add oleh pull.
+  addToDeleteRegistry(itemId, new Date().toISOString());
+  console.log('[RecallFox] deleteVaultItem: added to registry', itemId);
+
   // Hard delete dari Supabase
   const { error } = await supabase.from(VAULT_TABLE).delete().eq('id', itemId);
   if (error) {
+    console.warn('[RecallFox] deleteVaultItem: cloud delete failed, enqueuing:', error.message);
     await dbEnqueueSync({ op: 'delete_vault', user_id: user.id, item_id: itemId });
+  } else {
+    console.log('[RecallFox] deleteVaultItem: cloud delete OK', itemId);
   }
   // Hapus screenshot blob dari Storage
   await deleteScreenshotBlob(user, itemId);
@@ -964,6 +984,9 @@ export async function deleteNote(user, noteId) {
   // v1.5.2 (P3 fix): IndexedDB delete PERTAMA — ghost note hilang dari UI
   // bahkan kalau cloud delete hang. Sebelumnya cloud delete DULU → kalau hang,
   // note masih muncul di UI (ghost).
+  // v1.11.0: Tambah ke delete registry DULU — lock supaya tidak re-appear.
+  addNoteToDeleteRegistry(noteId, new Date().toISOString());
+  console.log('[RecallFox] deleteNote: added to registry', noteId);
   await dbDeleteNote(noteId);
   try {
     const { error } = await withTimeout(
@@ -994,6 +1017,12 @@ export async function pullFromCloud(user) {
   if (!user) return { ok: false, error: 'no_user' };
   const currentDeviceId = getDeviceId();
 
+  // v1.11.0: Cleanup delete registry sebelum pull (hapus entry >30 hari).
+  cleanupDeleteRegistry();
+  const deletedItemIds = new Set(getDeletedItemIds());
+  const deletedNoteIds = new Set(getDeletedNoteIds());
+  console.log('[RecallFox] pullFromCloud: delete registry has', deletedItemIds.size, 'items,', deletedNoteIds.size, 'notes');
+
   // Pull vault_items (HANYA yang deleted_at IS NULL)
   const { data: items, error: e1 } = await supabase
     .from(VAULT_TABLE)
@@ -1017,6 +1046,15 @@ export async function pullFromCloud(user) {
         if (li.source?.isGroup) {
           continue; // Skip deletion — folder mungkin belum sync
         }
+        // v1.11.0: Jangan hapus item yang baru saja di-delete di device ini
+        // (sudah ada di delete registry + masih dalam grace period 5 menit).
+        // Item ini sengaja dihapus, bukan "hilang dari cloud karena belum sync".
+        if (deletedItemIds.has(li.id)) {
+          // Pastikan dihapus dari IndexedDB (kalau masih ada)
+          await dbDeleteVaultItem(li.id);
+          await dbDeleteScreenshotBlob(li.id);
+          continue;
+        }
         const createdAt = new Date(li.created_at || 0).getTime();
         if (now - createdAt > 60000) {
           await dbDeleteVaultItem(li.id);
@@ -1026,6 +1064,16 @@ export async function pullFromCloud(user) {
     }
     // Merge cloud → local (last-write-wins by updated_at)
     for (const row of items) {
+      // v1.11.0: SKIP item yang ada di delete registry — jangan re-add.
+      // Root cause bug "item muncul kembali": device lain push ulang item yang
+      // sudah dihapus di device ini. Delete registry lock mencegah re-add.
+      if (deletedItemIds.has(row.id)) {
+        console.log('[RecallFox] pullFromCloud: skip item in delete registry', row.id);
+        // Pastikan juga dihapus dari IndexedDB (kalau masih ada)
+        await dbDeleteVaultItem(row.id);
+        await dbDeleteScreenshotBlob(row.id);
+        continue;
+      }
       const local = await (await import('./db.js')).dbGetVaultItem(row.id);
       if (!local || new Date(row.updated_at) > new Date(local.updated_at || 0)) {
         await dbPutVaultItem(row);
@@ -1059,6 +1107,11 @@ export async function pullFromCloud(user) {
     for (const ln of localNotes) {
       if (!cloudIds.has(ln.id) && ln.user_id === user.id) {
         // v1.8.4: HAPUS isOwnDevice check — sama seperti vault items fix.
+        // v1.11.0: Jangan hapus note yang baru saja di-delete di device ini.
+        if (deletedNoteIds.has(ln.id)) {
+          await dbDeleteNote(ln.id);
+          continue;
+        }
         const createdAt = new Date(ln.created_at || 0).getTime();
         if (now - createdAt > 60000) {
           await dbDeleteNote(ln.id);
@@ -1066,9 +1119,13 @@ export async function pullFromCloud(user) {
       }
     }
     for (const row of notes) {
+      // v1.11.0: SKIP note yang ada di delete registry — jangan re-add.
+      if (deletedNoteIds.has(row.id)) {
+        console.log('[RecallFox] pullFromCloud: skip note in delete registry', row.id);
+        await dbDeleteNote(row.id);
+        continue;
+      }
       // v1.5.2 (P5 fix): Reuse localNotes yang sudah di-fetch di line ~807.
-      // Sebelumnya: setiap iterasi panggil `await import('./db.js').then(dbGetAllNotes)`
-      // → N+1 dynamic import + N+1 full table scan. Untuk 100 notes = 100x import + 100x query.
       const ln = localNotes.find(n => n.id === row.id);
       if (!ln || new Date(row.updated_at) > new Date(ln.updated_at || 0)) {
         await dbPutNote(row);
@@ -1098,12 +1155,28 @@ export function subscribeRealtime(user, onChange) {
           if (row?.id) {
             await dbDeleteVaultItem(row.id);
             await dbDeleteScreenshotBlob(row.id);
+            // v1.11.0: Tambah ke delete registry supaya pull berikutnya tidak re-add.
+            addToDeleteRegistry(row.id, new Date().toISOString());
+            console.log('[RecallFox] realtime DELETE: added to registry', row.id);
           }
         } else if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
           if (row?.deleted_at) {
             await dbDeleteVaultItem(row.id);
             await dbDeleteScreenshotBlob(row.id);
+            // v1.11.0: Soft-delete di cloud → tambah ke registry.
+            addToDeleteRegistry(row.id, row.deleted_at);
           } else {
+            // v1.11.0: Cek delete registry SEBELUM re-add item via realtime.
+            // Root cause: device lain INSERT item yang sudah dihapus di device ini
+            // (karena device lain belum sync). Kalau kita terima INSERT ini tanpa
+            // cek registry, item akan muncul kembali. Delete registry lock mencegah.
+            if (row?.id && isInDeleteRegistry(row.id)) {
+              console.log('[RecallFox] realtime INSERT/UPDATE: skip item in delete registry', row.id);
+              // Pastikan dihapus dari IndexedDB (kalau masih ada)
+              await dbDeleteVaultItem(row.id);
+              await dbDeleteScreenshotBlob(row.id);
+              return; // JANGAN panggil onChange supaya UI tidak re-render dengan item yang dihapus
+            }
             await dbPutVaultItem(row);
           }
         }
@@ -1119,11 +1192,21 @@ export function subscribeRealtime(user, onChange) {
       async (payload) => {
         const row = payload.new || payload.old;
         if (payload.eventType === 'DELETE') {
-          if (row?.id) await dbDeleteNote(row.id);
+          if (row?.id) {
+            await dbDeleteNote(row.id);
+            addNoteToDeleteRegistry(row.id, new Date().toISOString());
+          }
         } else if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
           if (row?.deleted_at) {
             await dbDeleteNote(row.id);
+            addNoteToDeleteRegistry(row.id, row.deleted_at);
           } else {
+            // v1.11.0: Cek delete registry SEBELUM re-add note via realtime.
+            if (row?.id && isNoteInDeleteRegistry(row.id)) {
+              console.log('[RecallFox] realtime INSERT/UPDATE: skip note in delete registry', row.id);
+              await dbDeleteNote(row.id);
+              return;
+            }
             await dbPutNote(row);
           }
         }
@@ -1213,6 +1296,15 @@ export async function processSyncQueue(user) {
           console.warn('[RecallFox] document upload retry failed:', entry.id, e.message);
         }
       } else if (entry.op === 'upsert_vault') {
+        // v1.11.0: SKIP upsert kalau item ada di delete registry.
+        // Root cause bug: queue berisi upsert_vault untuk item yang sudah dihapus
+        // (di-queue sebelum hapus). Kalau diproses, item di-INSERT ulang ke cloud
+        // → muncul kembali di device lain. Delete registry lock mencegah ini.
+        if (entry.row?.id && isInDeleteRegistry(entry.row.id)) {
+          console.log('[RecallFox] processSyncQueue: skip upsert_vault for deleted item', entry.row.id);
+          await dbDeleteSyncQueueItem(entry.id);
+          continue;
+        }
         const { error } = await supabase.from(VAULT_TABLE).upsert(entry.row);
         if (!error) await dbDeleteSyncQueueItem(entry.id);
       } else if (entry.op === 'delete_vault') {
