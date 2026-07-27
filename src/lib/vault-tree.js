@@ -107,6 +107,27 @@ export function createGroup(name, type, userId) {
 export function buildTree(items, expandedIds, categoryFilter, showGroups, sortMode) {
   // v3.19.0: sortMode — 'recent'|'name'|'oldest'|'uses'|'fav' (default: 'recent')
   const sm = sortMode || 'recent';
+
+  // v1.11.1 FIX (defensive): Dedup by ID di awal buildTree.
+  // Root cause bug "folder duplikat render": folder dengan type='prompt' + isGroup=true
+  // bisa lolos filter di vault.js + masuk lagi via groupItems → array items punya id sama 2x.
+  // buildTree tidak dedup → render 2x.
+  // Safety net ini memastikan tidak ada duplikat regardless of input.
+  if (items && items.length > 0) {
+    const seenIds = new Set();
+    const deduped = [];
+    for (const it of items) {
+      if (!it || !it.id) continue;
+      if (seenIds.has(it.id)) {
+        console.warn('[RecallFox/buildTree] Dedup: skipping duplicate id', it.id);
+        continue;
+      }
+      seenIds.add(it.id);
+      deduped.push(it);
+    }
+    items = deduped;
+  }
+
   // v1.9.3 PWA: Build index
   const allByParent = new Map();
   const topLevel = [];

@@ -142,7 +142,13 @@ async function renderList() {
   try {
     const allItems = await dbGetAllVaultItems();
     // v1.8.0: Filter TEXT_TYPES + folder groups (isGroup). Folder groups punya source.isGroup=true.
-    let items = allItems.filter(i => TEXT_TYPES.includes(i.type) && !i.archived);
+    // v1.11.1 FIX BUG "folder duplikat render":
+    //   Sebelumnya: `items = allItems.filter(i => TEXT_TYPES.includes(i.type) && !i.archived)`
+    //   Bug: folder (isGroup=true) punya type='prompt' (default dari createGroup) → lolos filter
+    //   Lalu `items = [...items, ...groupItems]` di line bawah → folder MASUK 2X ke array items
+    //   buildTree tidak dedup → render folder 2x + children 2x.
+    //   Fix: exclude isGroup items dari filter TEXT_TYPES.
+    let items = allItems.filter(i => TEXT_TYPES.includes(i.type) && !i.archived && !isGroupItem(i));
     // Include group items untuk tree rendering
     let groupItems = allItems.filter(i => isGroupItem(i) && !i.archived);
 
@@ -198,6 +204,26 @@ async function renderList() {
     }
 
     items = [...items, ...groupItems];
+
+    // v1.11.1 FIX (defensive): Dedup by ID — jangan ada item dengan id sama 2x di array.
+    // Walaupun Fix #1 sudah mencegah duplikasi dari filter, ini safety net untuk:
+    //   - Bug lain yang mungkin muncul di filter logic
+    //   - IndexedDB corruption (race condition put)
+    //   - Data legacy dari versi lama
+    const seenIds = new Set();
+    const beforeDedup = items.length;
+    items = items.filter(i => {
+      if (!i || !i.id) return false;
+      if (seenIds.has(i.id)) {
+        console.warn('[RecallFox] Dedup: removing duplicate item id', i.id, 'title=', i.title);
+        return false;
+      }
+      seenIds.add(i.id);
+      return true;
+    });
+    if (items.length < beforeDedup) {
+      console.log('[RecallFox] Dedup removed', beforeDedup - items.length, 'duplicate item(s)');
+    }
 
     // v1.9.6 FIX BUG "folder tidak bisa dibuka":
     // Auto-expand folder yang punya children di first render — supaya user
