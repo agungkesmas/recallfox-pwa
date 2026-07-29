@@ -151,6 +151,24 @@ export function openDocumentEditorMultiPage(initialDataUrl, opts = {}) {
     const pageThumbs = overlay.querySelector('#pageThumbs');
     const loadingEl = overlay.querySelector('#docLoading');
 
+    // v1.11.3: Auto-focus + auto-select judul saat modal dokumen v1.4 dibuka —
+    //   standar sama dengan modal anotasi (src/annotate.js) & edit dokumen lama (src/document.js).
+    //   User: "nama file ketika di pencet itu dalam kondisi terblok, sehingga bisa
+    //   langsung di rename/ ditimpa untuk diberi nama baru."
+    titleInput.addEventListener('focus', () => {
+      setTimeout(() => titleInput.select(), 0);
+    });
+    setTimeout(() => {
+      try { titleInput.focus(); titleInput.select(); } catch (e) { /* ignore */ }
+    }, 120);
+    titleInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const doneBtn = overlay.querySelector('[data-action="done"]');
+        if (doneBtn) doneBtn.click();
+      }
+    });
+
     // ===== Render current page =====
     async function renderCurrentPage() {
       const page = pages[currentPageIdx];

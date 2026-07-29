@@ -93,6 +93,21 @@ export function openAnnotateEditor(dataUrl, opts = {}) {
     titleInput.addEventListener('focus', () => {
       setTimeout(() => titleInput.select(), 0);
     });
+    // v1.11.3: Auto-focus + auto-select saat modal anotasi dibuka — sehingga user
+    //   tidak perlu klik dulu untuk mulai menimpa nama default.
+    //   User: "nama file ketika di pencet itu dalam kondisi terblok, sehingga bisa
+    //   langsung di rename/ ditimpa untuk diberi nama baru."
+    setTimeout(() => {
+      try { titleInput.focus(); titleInput.select(); } catch (e) { /* ignore */ }
+    }, 120);
+    // Enter pada title input = trigger tombol done (lebih cepat save).
+    titleInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const doneBtn = overlay.querySelector('[data-action="done"]');
+        if (doneBtn) doneBtn.click();
+      }
+    });
     const bgCtx = bgCanvas.getContext('2d');
     const drawCtx = drawCanvas.getContext('2d');
     const previewCtx = previewCanvas.getContext('2d');

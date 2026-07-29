@@ -92,6 +92,25 @@ export function openDocumentEditor(dataUrl, opts = {}) {
     const titleInput = overlay.querySelector('.rf-doc-title-input');
     const noteInput = overlay.querySelector('.rf-doc-note-input');
 
+    // v1.11.3: Auto-focus + auto-select judul saat modal dokumen dibuka —
+    //   user bisa langsung ketik untuk menimpa nama default.
+    //   User: "nama file ketika di pencet itu dalam kondisi terblok, sehingga bisa
+    //   langsung di rename/ ditimpa untuk diberi nama baru."
+    //   Standar sama dengan modal anotasi (src/annotate.js) & rename sheet (vault.js).
+    titleInput.addEventListener('focus', () => {
+      setTimeout(() => titleInput.select(), 0);
+    });
+    setTimeout(() => {
+      try { titleInput.focus(); titleInput.select(); } catch (e) { /* ignore */ }
+    }, 120);
+    titleInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        const doneBtn = overlay.querySelector('[data-action="done"]');
+        if (doneBtn) doneBtn.click();
+      }
+    });
+
     // ===== Load image & init =====
     const img = new Image();
     img.onload = () => {

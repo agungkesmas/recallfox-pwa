@@ -767,7 +767,19 @@ function promptRenameFolder(folderId, currentName) {
   requestAnimationFrame(() => {
     sheet.classList.add('open');
     const input = sheet.querySelector('#renameInput');
-    if (input) { input.focus(); input.select(); }
+    if (input) {
+      input.focus();
+      input.select();
+      // v1.11.3: Re-select on focus supaya user bisa klik keluar lalu klik balik
+      //   tanpa kehilangan behavior "terblok langsung".
+      input.addEventListener('focus', () => {
+        setTimeout(() => input.select(), 0);
+      });
+      // Enter = save
+      input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); sheet.querySelector('[data-action="save"]')?.click(); }
+      });
+    }
   });
 
   const close = () => {
@@ -1247,6 +1259,25 @@ function openEditItemSheet(itemId) {
         showToast('Gagal simpan: ' + e.message);
       }
     });
+
+    // v1.11.3: Auto-focus + auto-select judul saat edit sheet dibuka —
+    //   user bisa langsung ketik untuk menimpa judul lama.
+    //   User: "nama file ketika di pencet itu dalam kondisi terblok, sehingga bisa
+    //   langsung di rename/ ditimpa untuk diberi nama baru."
+    //   Standar sama dengan rename sheet (#renameInput line 770).
+    const editTitleEl = body.querySelector('#editTitle');
+    if (editTitleEl) {
+      editTitleEl.addEventListener('focus', () => {
+        setTimeout(() => editTitleEl.select(), 0);
+      });
+      setTimeout(() => {
+        try { editTitleEl.focus(); editTitleEl.select(); } catch (e) { /* ignore */ }
+      }, 120);
+      // Enter = save
+      editTitleEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); body.querySelector('#editSave')?.click(); }
+      });
+    }
   })();
 }
 

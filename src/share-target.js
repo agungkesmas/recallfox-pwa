@@ -214,6 +214,23 @@ export async function showSharePreviewModal(data, user) {
   const cancelBtn = modal.querySelector('#shareCancel');
   const saveBtn = modal.querySelector('#shareSave');
 
+  // v1.11.3: Auto-focus + auto-select judul saat share-target modal dibuka —
+  //   user bisa langsung ketik untuk menimpa judul yang di-pre-fill (atau biarkan
+  //   kalau sudah cocok). Standar sama dengan modal anotasi & edit dokumen.
+  //   User: "nama file ketika di pencet itu dalam kondisi terblok, sehingga bisa
+  //   langsung di rename/ ditimpa untuk diberi nama baru.
+  //   tolong standarkan dengan fungsi lainnya..."
+  titleInput.addEventListener('focus', () => {
+    setTimeout(() => titleInput.select(), 0);
+  });
+  setTimeout(() => {
+    try { titleInput.focus(); titleInput.select(); } catch (e) { /* ignore */ }
+  }, 120);
+  // Enter = save
+  titleInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); saveBtn?.click(); }
+  });
+
   // v1.9.1 Fix #3: Auto-fetch page title dari URL
   autoBtn.addEventListener('click', async () => {
     if (!url) return;

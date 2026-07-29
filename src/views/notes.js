@@ -367,6 +367,22 @@ export async function openNoteEditor(noteId, onDone) {
   document.body.appendChild(modal);
   setTimeout(() => modal.classList.add('open'), 10);
 
+  // v1.11.3: Auto-focus + auto-select judul catatan saat modal dibuka —
+  //   user bisa langsung ketik untuk menimpa judul lama (kalau edit existing note).
+  //   User: "nama file ketika di pencet itu dalam kondisi terblok, sehingga bisa
+  //   langsung di rename/ ditimpa untuk diberi nama baru.
+  //   tolong standarkan dengan fungsi lainnya selain screnshot harus kondisi sudah
+  //   terblok sehingga memudahkan dalam melakukan rename."
+  const noteTitleEl = modal.querySelector('#noteTitle');
+  if (noteTitleEl) {
+    noteTitleEl.addEventListener('focus', () => {
+      setTimeout(() => noteTitleEl.select(), 0);
+    });
+    setTimeout(() => {
+      try { noteTitleEl.focus(); noteTitleEl.select(); } catch (e) { /* ignore */ }
+    }, 120);
+  }
+
   let selectedColor = note?.color || 'default';
   modal.querySelectorAll('.color-chip').forEach(chip => {
     chip.addEventListener('click', () => {
