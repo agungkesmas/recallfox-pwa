@@ -14,7 +14,7 @@ import './styles/views.css';
 
 import { getSession, onAuthChange } from './auth.js';
 import { pullFromCloud, subscribeRealtime, unsubscribeRealtime, processSyncQueue } from './sync.js';
-import { renderLogin } from './views/login.js';
+import { renderLogin, renderForgotPassword, renderResetPassword } from './views/login.js';
 import { renderMedia, startCaptureFlow, startDocumentFlow } from './views/media.js';
 import { renderNotes, openNoteEditor } from './views/notes.js';
 import { renderSettings } from './views/settings.js';
@@ -60,6 +60,25 @@ async function init() {
 
   // === RENDER APP NORMAL — tidak peduli share-target atau tidak ===
   const session = await getSession();
+
+  // v1.11.4: Hash routing untuk auth pages (forgot-password, reset-password)
+  const hash = window.location.hash || '';
+  if (hash.startsWith('#/forgot-password')) {
+    renderForgotPassword();
+    onAuthChange(async (user) => {
+      // Kalau user tiba-tiba login (misal session masih aktif), redirect ke app
+      if (user) {
+        window.location.hash = '';
+        window.location.reload();
+      }
+    });
+    return;
+  }
+  if (hash.startsWith('#/reset-password')) {
+    renderResetPassword();
+    return;
+  }
+
   if (session?.user) {
     await showApp(session.user);
     // v1.9.0: Setelah app fully rendered, cek apakah ada pending share

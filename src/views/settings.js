@@ -2,8 +2,9 @@
 // v1.7.1: Fix version label (sebelumnya hardcoded "v1.0.0"), tambah info lengkap
 // v1.8.7: Version sekarang dynamic — di-inject via Vite define di vite.config.js
 //         (lihat __APP_VERSION__ define). Tidak perlu update manual setiap release.
+// v1.11.4: Tambah "Change Password" section dengan verifikasi password lama
 
-import { signOut } from '../auth.js';
+import { signOut, changePassword, getPasswordStrength } from '../auth.js';
 import { processSyncQueue } from '../sync.js';
 import { dbGetSyncQueue, dbGetAllVaultItems, dbGetAllNotes } from '../db.js';
 
@@ -53,6 +54,33 @@ export async function renderSettings(user, onLogout) {
     </div>
 
     <div class="settings-card">
+      <h3>🔐 Keamanan</h3>
+      <p style="font-size:13px;color:var(--text-muted);margin:0 0 12px">
+        Ubah password akun kamu. Demi keamanan, password lama akan diverifikasi dulu.
+      </p>
+      <form id="changePwForm" class="settings-form">
+        <div class="password-field">
+          <input type="password" id="currentPw" placeholder="Password lama" required autocomplete="current-password">
+          <button type="button" class="toggle-pw" data-target="currentPw" title="Tampilkan">👁️</button>
+        </div>
+        <div class="password-field">
+          <input type="password" id="newPw" placeholder="Password baru (min 8 karakter)" required autocomplete="new-password" minlength="8">
+          <button type="button" class="toggle-pw" data-target="newPw" title="Tampilkan">👁️</button>
+        </div>
+        <div class="pw-strength" id="pwStrength">
+          <div class="pw-strength-bar"><div class="pw-strength-fill" style="width:0%"></div></div>
+          <span class="pw-strength-label">Kosong</span>
+        </div>
+        <div class="password-field">
+          <input type="password" id="confirmPw" placeholder="Ulangi password baru" required autocomplete="new-password">
+          <button type="button" class="toggle-pw" data-target="confirmPw" title="Tampilkan">👁️</button>
+        </div>
+        <button type="submit" class="btn btn-primary" id="changePwBtn">Ubah Password</button>
+      </form>
+      <div id="changePwMsg" class="login-error"></div>
+    </div>
+
+    <div class="settings-card">
       <h3>📊 Statistik Vault</h3>
       <div class="setting-row">
         <span>Total item</span>
@@ -86,15 +114,102 @@ export async function renderSettings(user, onLogout) {
       </p>
     </div>
   `;
+
+  // Logout
   document.getElementById('logoutBtn').addEventListener('click', async () => {
     if (!confirm('Keluar dari akun?')) return;
     await signOut();
     onLogout();
   });
+
+  // Retry sync
   document.getElementById('retrySyncBtn').addEventListener('click', async () => {
     await processSyncQueue(user);
     renderSettings(user, onLogout);
   });
+
+  // v1.11.4: Change Password handlers
+  wireChangePassword(user);
+
+  // v1.11.4: Toggle password visibility (reusable)
+  document.querySelectorAll('.toggle-pw[data-target]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const target = document.getElementById(btn.dataset.target);
+      if (!target) return;
+      const isPw = target.type === 'password';
+      target.type = isPw ? 'text' : 'password';
+      btn.textContent = isPw ? '🙈' : '👁️';
+    });
+  });
+}
+
+// v1.11.4: Wire change password form
+function wireChangePassword(user) {
+  const form = document.getElementById('changePwForm');
+  const msg = document.getElementById('changePwMsg');
+  const newPwInput = document.getElementById('newPw');
+  const confirmInput = document.getElementById('confirmPw');
+  const strengthBar = document.querySelector('#pwStrength .pw-strength-fill');
+  const strengthLabel = document.querySelector('#pwStrength .pw-strength-label');
+  const btn = document.getElementById('changePwBtn');
+
+  // Real-time strength meter
+  newPwInput.addEventListener('input', () => {
+    const pw = newPwInput.value;
+    const { score, label, color } = getPasswordStrength(pw);
+    strengthBar.style.width = ((score / 4) * 100) + '%';
+    strengthBar.style.background = color;
+    strengthLabel.textContent = label;
+    strengthLabel.style.color = color;
+  });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    msg.textContent = '';
+    msg.style.color = '';
+
+    const currentPw = document.getElementById('currentPw').value;
+    const newPw = newPwInput.value;
+    const confirmPw = confirmInput.value;
+
+    if (newPw !== confirmPw) {
+      msg.textContent = '❌ Password baru dan konfirmasi tidak cocok';
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = '⏳ Memverifikasi...';
+    msg.textContent = '⏳ Memverifikasi password lama & memperbarui...';
+    msg.style.color = 'var(--text-muted, #6b7280)';
+
+    const res = await changePassword(currentPw, newPw, user.email);
+
+    btn.disabled = false;
+    btn.textContent = 'Ubah Password';
+
+    if (res.ok) {
+      msg.innerHTML = '✓ <strong>Password berhasil diubah.</strong> Silakan login lagi dengan password baru.';
+      msg.style.color = '#16a34a';
+      form.reset();
+      strengthBar.style.width = '0%';
+      strengthLabel.textContent = 'Kosong';
+      // Auto logout setelah 3 detik supaya user re-login dengan password baru
+      setTimeout(async () => {
+        await signOut();
+        onLogoutCompat();
+      }, 3000);
+    } else {
+      msg.textContent = '❌ ' + res.error;
+      msg.style.color = '#dc2626';
+    }
+  });
+}
+
+// Compat: call onLogout if available (settings.js scope)
+function onLogoutCompat() {
+  // Re-read main and trigger navigation by clearing hash
+  window.location.hash = '#/login';
+  window.location.reload();
 }
 
 function escapeHtml(s) {
