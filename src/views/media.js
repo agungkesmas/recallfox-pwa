@@ -32,9 +32,9 @@ export function renderMedia(user, onRefresh) {
     <div class="batch-bar" id="batchBar" style="display:none">
       <span id="batchCount">0 dipilih</span>
       <div class="batch-actions">
-        <button class="btn btn-secondary" id="batchCopyCaption">📋 + Keterangan</button>
-        <button class="btn btn-secondary" id="batchCopyImg">🖼️ Gambar</button>
-        <button class="btn btn-secondary" id="batchCopyText">📝 Teks Saja</button>
+        <button class="btn btn-secondary" id="batchCopyCaption">📋 Salin + Keterangan</button>
+        <button class="btn btn-secondary" id="batchCopyImg">🖼️ Salin Gambar Saja</button>
+        <button class="btn btn-secondary" id="batchCopyText">📝 Salin Teks Saja</button>
         <button class="btn btn-danger" id="batchDelete">🗑️ Hapus</button>
         <button class="btn btn-ghost" id="batchCancel">✕</button>
       </div>
@@ -181,9 +181,10 @@ async function openItemDetail(id) {
         <div class="caption-preview" id="viewerCaption">${escapeHtml(cap.textPlain).replace(/\n/g, '<br>')}</div>
       </div>
       <div class="modal-footer">
-        <button class="btn btn-secondary" data-action="copy-img">🖼️ Gambar</button>
-        <button class="btn btn-primary" data-action="copy-cap">📋 + Keterangan</button>
-        <button class="btn btn-secondary" data-action="edit-note" title="Edit catatan anotasi">📝 Catatan</button>
+        <button class="btn btn-secondary" data-action="copy-img">🖼️ Salin Gambar</button>
+        <button class="btn btn-primary" data-action="copy-cap">📋 Salin + Keterangan</button>
+        <button class="btn btn-secondary" data-action="copy-meta">📝 Salin Teks Metadata</button>
+        <button class="btn btn-secondary" data-action="edit-note" title="Edit catatan anotasi">📝 Catatan Anotasi</button>
         <button class="btn btn-danger" data-action="delete">🗑️</button>
       </div>
       <div class="viewer-navigator" id="viewerNav">
@@ -296,6 +297,14 @@ async function openItemDetail(id) {
     } else if (action === 'copy-cap') {
       const r = await writeScreenshotToClipboard(dataUrl, cap.textPlain, cap.textHtml);
       showToast(r.ok ? r.message : 'Gagal: ' + r.error, !r.ok);
+    } else if (action === 'copy-meta') {
+      // v1.11.6: Salin Teks Metadata — text only, no image. Sama seperti addon.
+      try {
+        await navigator.clipboard.writeText(cap.textPlain);
+        showToast('✓ Teks metadata tersalin (paste ke WA/Gemini/AI chat)');
+      } catch (e) {
+        showToast('Gagal salin teks: ' + e.message, true);
+      }
     } else if (action === 'delete') {
       if (!confirm('Hapus item ini? Tidak bisa di-undo.')) return;
       await deleteVaultItem(window.__rfUser, currentItem.id);
@@ -349,8 +358,9 @@ async function openDocumentDetail(item) {
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn btn-secondary" data-action="copy-img">🖼️ Gambar</button>
-        <button class="btn btn-primary" data-action="copy-cap">📋 + Keterangan</button>
+        <button class="btn btn-secondary" data-action="copy-img">🖼️ Salin Gambar</button>
+        <button class="btn btn-primary" data-action="copy-cap">📋 Salin + Keterangan</button>
+        <button class="btn btn-secondary" data-action="copy-meta">📝 Salin Teks Metadata</button>
         <button class="btn btn-danger" data-action="delete">🗑️ Hapus</button>
       </div>
     </div>
@@ -390,6 +400,20 @@ async function openDocumentDetail(item) {
         `</div>`;
       const r = await writeScreenshotToClipboard(dataUrl, textPlain, textHtml);
       showToast(r.ok ? r.message : 'Gagal: ' + r.error, !r.ok);
+    } else if (action === 'copy-meta') {
+      // v1.11.6: Salin Teks Metadata — text only, no image. Sama seperti addon.
+      const dateStr = new Date(item.created_at).toLocaleString('id-ID', { dateStyle: 'full', timeStyle: 'short' });
+      const textPlain = `📄 ${item.title || 'Dokumen'}\n` +
+        `Tipe: Dokumen scan${pageCount > 1 ? ` (${pageCount} halaman)` : ' (1 halaman)'}\n` +
+        `Filter: ${filter}\n` +
+        `Waktu: ${dateStr}\n` +
+        (note ? `Catatan: ${note}\n` : '');
+      try {
+        await navigator.clipboard.writeText(textPlain);
+        showToast('✓ Teks metadata tersalin (paste ke WA/Gemini/AI chat)');
+      } catch (e) {
+        showToast('Gagal salin teks: ' + e.message, true);
+      }
     } else if (action === 'delete') {
       if (!confirm('Hapus dokumen ini? Tidak bisa di-undo.')) return;
       await deleteVaultItem(window.__rfUser, item.id);

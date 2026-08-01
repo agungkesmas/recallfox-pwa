@@ -56,9 +56,9 @@ export async function openDocumentViewer(item, onRefresh) {
         ${totalPages > 1 ? `<button class="btn btn-secondary" data-action="next">▶</button>` : ''}
       </div>
       <div class="modal-footer">
-        <button class="btn btn-secondary" data-action="copy-page">🖼️ Hal Ini</button>
-        ${totalPages > 1 ? `<button class="btn btn-secondary" data-action="copy-all">📚 Semua</button>` : ''}
-        <button class="btn btn-primary" data-action="copy-cap">📋 + Keterangan</button>
+        <button class="btn btn-secondary" data-action="copy-page">🖼️ Salin Gambar</button>
+        <button class="btn btn-primary" data-action="copy-cap">📋 Salin + Keterangan</button>
+        <button class="btn btn-secondary" data-action="copy-meta">📝 Salin Teks Metadata</button>
         <button class="btn btn-danger" data-action="delete">🗑️</button>
       </div>
     </div>
@@ -169,35 +169,33 @@ export async function openDocumentViewer(item, onRefresh) {
     } else if (action === 'next') {
       if (currentPage < totalPages - 1) renderPage(currentPage + 1);
     } else if (action === 'copy-page') {
-      const dataUrl = pageDataUrls[currentPage];
-      if (!dataUrl) { showToast('Halaman belum termuat', true); return; }
-      const r = await writeScreenshotToClipboard(dataUrl, '', '');
-      showToast(r.ok ? '✓ Halaman tersalin' : 'Gagal: ' + r.error, !r.ok);
-    } else if (action === 'copy-all') {
-      // Composite semua halaman jadi 1 gambar (vertical stack)
-      showToast('Menyiapkan semua halaman...');
+      // v1.11.6: Salin Gambar — composite SEMUA halaman (sama seperti addon "Salin Gambar").
+      // Sebelumnya: hanya pageDataUrls[currentPage] (1 halaman). User expect "Salin Gambar" = semua.
+      showToast('🖼️ Menyiapkan semua halaman...');
       const dataUrls = await Promise.all(pages.map((_, i) => loadPage(i)));
       const validUrls = dataUrls.filter(Boolean);
       if (validUrls.length === 0) { showToast('Tidak ada halaman termuat', true); return; }
-      // Load all images
-      const imgs = await Promise.all(validUrls.map(loadImage));
-      const totalH = imgs.reduce((sum, img) => sum + img.naturalHeight, 0);
-      const maxW = Math.max(...imgs.map(img => img.naturalWidth));
-      const canvas = document.createElement('canvas');
-      canvas.width = maxW;
-      canvas.height = totalH;
-      const ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#fff';
-      ctx.fillRect(0, 0, maxW, totalH);
-      let y = 0;
-      for (const img of imgs) {
-        ctx.drawImage(img, 0, y);
-        y += img.naturalHeight;
+      let compositeDataUrl;
+      if (validUrls.length === 1) {
+        compositeDataUrl = validUrls[0];
+      } else {
+        const imgs = await Promise.all(validUrls.map(loadImage));
+        const totalH = imgs.reduce((sum, img) => sum + img.naturalHeight, 0);
+        const maxW = Math.max(...imgs.map(img => img.naturalWidth));
+        const canvas = document.createElement('canvas');
+        canvas.width = maxW;
+        canvas.height = totalH;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, maxW, totalH);
+        let y = 0;
+        for (const img of imgs) {
+          ctx.drawImage(img, 0, y);
+          y += img.naturalHeight;
+        }
+        compositeDataUrl = canvas.toDataURL('image/png');
       }
-      const allDataUrl = canvas.toDataURL('image/png');
-      // Build caption with all pages
-      const cap = buildDocCaption(item, validUrls.length);
-      const r = await writeScreenshotToClipboard(allDataUrl, cap.textPlain, cap.textHtml);
+      const r = await writeScreenshotToClipboard(compositeDataUrl, '', '');
       showToast(r.ok ? `✓ ${validUrls.length} halaman tersalin` : 'Gagal: ' + r.error, !r.ok);
     } else if (action === 'copy-cap') {
       // v1.6.3: Composite SEMUA halaman (bukan cuma current) + keterangan.
@@ -230,6 +228,15 @@ export async function openDocumentViewer(item, onRefresh) {
       const cap = buildDocCaption(item, validUrls.length);
       const r = await writeScreenshotToClipboard(compositeDataUrl, cap.textPlain, cap.textHtml);
       showToast(r.ok ? `✓ ${validUrls.length} halaman + keterangan tersalin` : 'Gagal: ' + r.error, !r.ok);
+    } else if (action === 'copy-meta') {
+      // v1.11.6: Salin Teks Metadata — text only, no image. Sama seperti addon.
+      const cap = buildDocCaption(item, totalPages);
+      try {
+        await navigator.clipboard.writeText(cap.textPlain);
+        showToast('✓ Teks metadata tersalin (paste ke WA/Gemini/AI chat)');
+      } catch (e) {
+        showToast('Gagal salin teks: ' + e.message, true);
+      }
     } else if (action === 'delete') {
       if (!confirm(`Hapus dokumen "${item.title}" (${totalPages} halaman)? Tidak bisa di-undo.`)) return;
       await deleteVaultItem(window.__rfUser, item.id);
