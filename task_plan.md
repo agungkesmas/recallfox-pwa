@@ -5,7 +5,7 @@
 > Hanya SATU task per sesi akun. Jangan kerjakan task `[doing:...]` milik akun lain.
 
 ## Fase Backlog (aktif)
-- [ ] fitur: forgot-password — link "Lupa password" di halaman login + alur set password baru (Supabase Auth reset)
+- [doing:akun1] fitur: forgot-password — link "Lupa password" di halaman login + alur set password baru (Supabase Auth reset)
 - [ ] _(tambahkan task berikutnya di sini)_
 
 ## Catatan
