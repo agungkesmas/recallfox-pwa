@@ -12,7 +12,7 @@ import './styles/base.css';
 import './styles/components.css';
 import './styles/views.css';
 
-import { getSession, onAuthChange } from './auth.js';
+import { getSession, onAuthChange, handleOAuthCallback } from './auth.js';
 import { pullFromCloud, subscribeRealtime, unsubscribeRealtime, processSyncQueue } from './sync.js';
 import { renderLogin, renderForgotPassword, renderResetPassword } from './views/login.js';
 import { renderMedia, startCaptureFlow, startDocumentFlow } from './views/media.js';
@@ -59,6 +59,10 @@ async function init() {
   }
 
   // === RENDER APP NORMAL — tidak peduli share-target atau tidak ===
+  // v1.11.8: Proses token OAuth callback (Google login) yang balik di URL.
+  // Harus dijalankan sebelum getSession() supaya session ter-set dulu.
+  const handledOAuth = await handleOAuthCallback();
+
   const session = await getSession();
 
   // v1.11.4: Hash routing untuk auth pages (forgot-password, reset-password)

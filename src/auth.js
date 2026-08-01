@@ -45,6 +45,49 @@ export async function getCurrentUser() {
   return data.user;
 }
 
+// ===========================================================================
+// v1.11.8: OAuth callback handler (Google login)
+// ===========================================================================
+// Karena detectSessionInUrl=false di supabase.js, token dari redirect OAuth
+// (contoh: https://host/#access_token=...&refresh_token=...) TIDAK diproses
+// otomatis oleh supabase-js. Helper ini mengambil token dari URL (query +
+// hash fragment), set session manual, lalu bersihkan URL supaya token tidak
+// nyangkut di history. Pola sama dengan setSession di reset-password flow.
+
+export async function handleOAuthCallback() {
+  const href = window.location.href;
+  const getParam = (name) => {
+    const re = new RegExp('[#?&]' + name + '=([^&#]*)');
+    const m = href.match(re);
+    return m ? decodeURIComponent(m[1]) : null;
+  };
+
+  // Jangan diproses di flow recovery (reset password) — itu ditangani sendiri
+  // oleh renderResetPassword. OAuth callback tidak punya type=recovery.
+  const type = getParam('type');
+  const accessToken = getParam('access_token');
+  const refreshToken = getParam('refresh_token');
+
+  if (type === 'recovery') return false;
+  if (!accessToken || !refreshToken) return false;
+
+  const { data, error } = await supabase.auth.setSession({
+    access_token: accessToken,
+    refresh_token: refreshToken
+  });
+  if (error || !data.session) {
+    return false;
+  }
+
+  // Bersihkan URL — hapus semua token dari hash/query (tetap pertahankan hash
+  // route kalau ada, mis. #/reset-password dipakai di recovery flow)
+  const hashRoute = (window.location.hash.match(/^#\/[^\s#]*/) || [''])[0];
+  const cleanUrl = window.location.origin + window.location.pathname + (hashRoute || '');
+  window.history.replaceState({}, document.title, cleanUrl);
+
+  return true;
+}
+
 export function onAuthChange(callback) {
   const { data } = supabase.auth.onAuthStateChange((_event, session) => {
     callback(session?.user || null, session);
