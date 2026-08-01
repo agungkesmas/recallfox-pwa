@@ -85,3 +85,14 @@ Login dengan akun yang sama yang dipakai di addon → semua data sinkron otomati
 ## Lisensi
 
 MIT
+
+---
+
+## Workflow Pengembangan Multi-Akun
+
+Proyek ini memakai workflow multi-akun chat.z.ai: git sebagai otak pusat, akun
+chat.z.ai sebagai tangan pekerja. Buka `RUNBOOK.md` untuk SOP lengkap.
+
+- `/sesi` → siapkan prompt sesi berikutnya → tempel di Firefox akun chat.z.ai
+- `/selesai` → simpan jawaban agent, update tracker, commit
+- Setup sekali: `echo "<token>" > sesi/.token` (git-ignored)

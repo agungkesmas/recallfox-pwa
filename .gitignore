@@ -5,5 +5,8 @@ dist/
 *.log
 .env
 .env.local
-.vercel
 .env*
+
+# Workflow multi-akun (opencode)
+sesi/.token
+sesi/prompt-berikutnya.txt
