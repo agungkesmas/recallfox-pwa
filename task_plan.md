@@ -5,11 +5,8 @@
 > Hanya SATU task per sesi akun. Jangan kerjakan task `[doing:...]` milik akun lain.
 
 ## Fase Backlog (aktif)
-- [ ] _(isi task berikutnya: bug/improvement. Contoh di bawah)_
-- [ ] Audit isi `CHANGELOG-v1.*.md` untuk ide task terbaru
-- [ ] Sync: verifikasi auto-select di modal rename (standar v1.11.3)
-- [ ] Scan dokumen: pastikan akses kamera stabil (fix v1.11.2)
-- [ ] Reset/change password: verifikasi alur (fitur v1.11.4)
+- [ ] fitur: forgot-password — link "Lupa password" di halaman login + alur set password baru (Supabase Auth reset)
+- [ ] _(tambahkan task berikutnya di sini)_
 
 ## Catatan
 - Versi berjalan: v1.11.x (lihat `package.json` dan changelog terbaru).

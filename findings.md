@@ -44,3 +44,13 @@
 ## 5. Keputusan Penting
 - Companion mobile, sync penuh via Supabase (bukan standalone).
 - Vanilla JS (tanpa framework) — jangan rombak ke React/Vue tanpa keputusan tertulis.
+
+## 6. Rencana Fitur — Forgot Password (belum dikerjakan)
+- Auth saat ini: Supabase Auth, email + password. Belum ada alur reset/lupa password.
+- Alur yang direncanakan (Supabase Auth bawaan):
+  1. Halaman login diberi link "Lupa password".
+  2. User masuk email → `supabase.auth.resetPasswordForEmail(email)` → Supabase kirim email reset.
+  3. Email berisi link redirect ke halaman set-password baru (redirectTo perlu disetup).
+  4. Halaman set-password baru → `supabase.auth.updateUser({ password })`.
+- Perlu diputuskan di Review Planning: URL redirect (`redirectTo`), gaya UI mengikuti desain login yang ada.
+- Implementasi paralel di Firefox & Chrome (repo `recallfox`, `recallfox-chrome`) — jaga parity alur & label.
