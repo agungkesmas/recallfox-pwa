@@ -28,3 +28,15 @@
     - **Perbedaan UI**: PWA pakai dedicated page (hash route `#/forgot-password` + `#/reset-password`), Firefox/Chrome pakai inline form di popup/sidebar (karena extension tidak punya multi-page routing).
     - **Redirect URL**: PWA default redirectTo = `https://recallfox-pwa.vercel.app/#/reset-password`. Firefox/Chrome hardcoded `https://recallfox-pwa.vercel.app/set-password` (TANPA hash `#`). → **PARITY BUG** di Firefox + Chrome — perlu fix redirectTo ke `https://recallfox-pwa.vercel.app/#/reset-password` supaya Supabase kirim email dengan link yang match PWA route.
   - **Cek jalan**: code sudah lulus review (dari commit v1.11.4). Belum test end-to-end di sesi ini karena fitur sudah ada. Test end-to-end butuh SMTP Supabase + klik link email manual.
+
+- 2026-08-01 — `fix: parsing token recovery pada URL double-hash dari Supabase (c2c8143)`
+  - **Task**: fix parsing recovery token di PWA — Supabase redirect ke `#/reset-password#access_token=...&type=recovery` (double hash), parsing lama (`URLSearchParams` pada query string) tidak mendeteksi token → selalu "Reset Gagal".
+  - **Fix**: `src/views/login.js` `renderResetPassword` — parsing robust cari `name=value` di seluruh URL (query + hash fragment) via regex `[#?&]name=([^&#]*)`.
+  - **Test end-to-end (lulus)**:
+    1. Email reset berisi `redirect_to=https://recallfox-pwa.vercel.app/#/reset-password` (bukan localhost).
+    2. Klik link → PWA menampilkan form "Reset Password" (token recovery terdeteksi & session ter-set).
+    3. Isi password baru `Syukur@2025` + konfirmasi → submit → redirect ke `#/login`.
+    4. Login API dgn password baru → HTTP 200. Password lama → HTTP 400 (invalid_credentials).
+  - **Catatan**: link recovery dibuat via admin `generate_link` (service role) krn rate limit email; hasil identik dgn link email.
+  - **Komitmen terkait**: `c2c8143` (fix parsing), `8eee386` (sync package-lock v1.11.7).
+  - **Cek jalan**: build `npm run build` sukses; deploy Vercel live (`index-DVCkdax2.js`).
