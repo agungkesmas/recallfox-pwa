@@ -12,3 +12,4 @@
 - Versi berjalan: v1.11.x (lihat `package.json` dan changelog terbaru).
 - Vanilla JS + Vite — ikuti gaya yang ada, jangan tambah framework.
 - Setiap task selesai → update `progress.md` dengan commit ref.
+- [x] fitur: login-google — tombol 'Login dengan Google' via Supabase Auth (OAuth), lalu commit 'planning: task login-google'. Setelah itu kerjakan task tersebut.
