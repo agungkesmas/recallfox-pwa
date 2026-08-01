@@ -7,11 +7,11 @@
 - Setiap akun: maksimal **4 kueri per hari**, lalu **blokir ±6 jam**.
 - Akun layak dipakai jika: `kueri < 4` DAN `blokir sampai` < sekarang.
 
-## Status Hari Ini: _(tulis tanggal)_
+## Status Hari Ini: 2026-08-01
 
 | Akun | Kueri terpakai | Blokir sampai | Sesi terakhir | Keterangan |
 |---|---|---|---|---|
-| 1 | 0/4 | - | - | - |
+| 1 | 3/4 | - | 2026-08-01 forgot-password 3 repo | Selesai: Firefox `f345cca` + Chrome `b0f3ee6` + PWA verify (fitur sudah ada sejak v1.11.4). Parity bug di Firefox/Chrome redirectTo perlu fix commit terpisah. |
 | 2 | 0/4 | - | - | - |
 | 3 | 0/4 | - | - | - |
 | 4 | 0/4 | - | - | - |
