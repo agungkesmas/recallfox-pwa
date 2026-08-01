@@ -148,14 +148,20 @@ export function renderForgotPassword() {
 export function renderResetPassword() {
   const app = document.getElementById('app');
 
-  // Cek apakah ada recovery token di URL
-  // Supabase redirect URL format: /#/reset-password?type=recovery&access_token=...&refresh_token=...
-  // Karena supabase.js pakai detectSessionInUrl=false, kita handle manual.
-  const url = new URL(window.location.href);
-  const params = new URLSearchParams(url.search);
-  const hashParams = new URLSearchParams(window.location.hash.replace(/^#\/?[^?]*\??/, ''));
-  const type = params.get('type') || hashParams.get('type');
-  const accessToken = params.get('access_token') || hashParams.get('access_token');
+  // Supabase redirect format (redirectTo = https://recallfox-pwa.vercel.app/#/reset-password):
+  //   - Biasanya:  https://host/#/reset-password#access_token=...&refresh_token=...&type=recovery
+  //     (Supabase append token sebagai fragment kedua — double hash)
+  //   - Dokumentasi lama / query-style: https://host/#/reset-password?type=recovery&access_token=...
+  // Parsing robust: cari name=value di seluruh URL (query + hash fragment).
+  const href = window.location.href;
+  const getParam = (name) => {
+    const re = new RegExp('[#?&]' + name + '=([^&#]*)');
+    const m = href.match(re);
+    return m ? decodeURIComponent(m[1]) : null;
+  };
+  const type = getParam('type') || '';
+  const accessToken = getParam('access_token');
+  const refreshToken = getParam('refresh_token');
 
   if (type === 'recovery' && accessToken) {
     // Supabase biasanya set session otomatis dari URL. Kalau tidak, tampilkan error.
@@ -165,7 +171,6 @@ export function renderResetPassword() {
     // Atau: biarkan Supabase handle di next reload dengan detectSessionInUrl=true.
     // Solusi paling clean: set session manual.
     import('../supabase.js').then(async ({ supabase }) => {
-      const refreshToken = params.get('refresh_token') || hashParams.get('refresh_token');
       if (refreshToken) {
         const { data, error } = await supabase.auth.setSession({
           access_token: accessToken,
