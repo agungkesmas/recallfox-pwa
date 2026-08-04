@@ -329,4 +329,68 @@ function navigateTo(view) {
 window.__rfNavigate = navigateTo;
 window.__rfRefreshCurrent = refreshCurrentView;
 
-init();
+// v1.11.9: Industry-standard session persistence — keep session alive indefinitely.
+//
+// Problem: User gets logged out after ~1 day of inactivity. This happens because:
+//   1. When PWA tab is closed, autoRefreshToken doesn't run → access_token expires (1h)
+//   2. When user reopens PWA after >1 day, refresh_token has also expired → logout
+//
+// Fix: Two-pronged approach:
+//   1. Heartbeat: while tab is open, call getSession() every 30 min. This triggers
+//      autoRefreshToken which rotates the refresh_token → extends its expiry.
+//      As long as user opens PWA at least once every REFRESH_TOKEN_EXPIRY period
+//      (default 7 days), session stays alive.
+//   2. visibilitychange: when user switches back to PWA tab, immediately call
+//      getSession() → triggers refresh if token is near expiry. This catches
+//      the case where user left tab open in background for hours.
+let _sessionHeartbeat = null;
+
+function startSessionHeartbeat() {
+  if (_sessionHeartbeat) clearInterval(_sessionHeartbeat);
+  // Every 30 minutes, call getSession() — triggers autoRefreshToken if needed
+  _sessionHeartbeat = setInterval(async () => {
+    try {
+      const session = await getSession();
+      if (session) {
+        console.log('[RecallFox] Session heartbeat: OK, expires_at =',
+          new Date((session.expires_at || 0) * 1000).toISOString());
+      } else {
+        console.log('[RecallFox] Session heartbeat: no session (logged out?)');
+        // Session might have been revoked — reload to show login page
+        if (window.__rfUser) {
+          console.log('[RecallFox] Session lost — reloading to login page');
+          window.location.reload();
+        }
+      }
+    } catch (e) {
+      console.warn('[RecallFox] Session heartbeat error:', e.message);
+    }
+  }, 30 * 60 * 1000); // 30 minutes
+}
+
+// visibilitychange: when tab becomes visible, trigger session check immediately
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible') {
+    try {
+      const session = await getSession();
+      if (!session && window.__rfUser) {
+        // Session was lost while tab was in background — reload
+        console.log('[RecallFox] Tab visible again — session lost, reloading');
+        window.location.reload();
+      } else if (session) {
+        console.log('[RecallFox] Tab visible again — session OK');
+      }
+    } catch (e) {
+      console.warn('[RecallFox] Visibility session check error:', e.message);
+    }
+  }
+});
+
+// Start heartbeat after init completes
+init().then(() => {
+  startSessionHeartbeat();
+}).catch(e => {
+  console.error('[RecallFox] Init error:', e);
+  // Still start heartbeat even if init fails — session might still be valid
+  startSessionHeartbeat();
+});
