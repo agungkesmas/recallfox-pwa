@@ -37,10 +37,11 @@ const TYPE_LABELS = {
   context: { label: 'Konteks', icon: '📋', color: '#3b82f6' },
   snapshot: { label: 'Snapshot', icon: '📸', color: '#8b5cf6' },
   link: { label: 'Link', icon: '🔗', color: '#f59e0b' },
-  bundle: { label: 'Bundle', icon: '📦', color: '#ec4899' }
+  bundle: { label: 'Bundle', icon: '📦', color: '#ec4899' },
+  file: { label: 'File', icon: '📄', color: '#6366f1' }
 };
 
-const TEXT_TYPES = ['prompt', 'context', 'snapshot', 'link', 'bundle'];
+const TEXT_TYPES = ['prompt', 'context', 'snapshot', 'link', 'bundle', 'file'];
 
 export function renderVault(user, onRefresh) {
   _onRefresh = onRefresh;
@@ -66,6 +67,7 @@ export function renderVault(user, onRefresh) {
         <option value="snapshot">📸 Snapshot</option>
         <option value="link">🔗 Link</option>
         <option value="bundle">📦 Bundle</option>
+        <option value="file">📄 File</option>
       </select>
       <select id="vaultSortBy" title="Urutkan">
         <option value="recent">Terbaru</option>
@@ -342,6 +344,14 @@ async function renderList() {
       });
     });
 
+    // v1.12.0: Item copy button (📋) → salin ke clipboard
+    list.querySelectorAll('.item-copy').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        copyItem(btn.dataset.id);
+      });
+    });
+
     // v1.10.0: Folder menu (⋯) → bottom sheet dengan opsi Rename/Archive/Delete/Move
     list.querySelectorAll('.folder-menu').forEach(btn => {
       btn.addEventListener('click', (e) => {
@@ -560,6 +570,7 @@ function renderItemCard(item, indent = 0) {
         ${tags ? `<div class="item-tags">${tags}</div>` : ''}
       </div>
       <div class="item-actions">
+        <button class="item-copy" data-id="${item.id}" title="Salin ke clipboard">📋</button>
         <button class="item-fav" data-id="${item.id}" title="Favorit">${isFav}</button>
         <button class="item-menu" data-id="${item.id}" title="Menu">⋯</button>
       </div>
@@ -591,9 +602,17 @@ async function copyItem(id) {
     const items = await dbGetAllVaultItems();
     const item = items.find(i => i.id === id);
     if (!item) return;
-    const text = item.body || item.note || item.title || '';
+    // v1.12.0: Type-aware copy — link→URL, file→body (isi teks), lainnya→body
+    let text = '';
+    if (item.type === 'link') {
+      text = item.link_url || item.linkUrl || item.body || item.title || '';
+    } else if (item.type === 'file') {
+      text = item.body || item.title || '';
+    } else {
+      text = item.body || item.note || item.title || '';
+    }
     await navigator.clipboard.writeText(text);
-    showToast('✓ Disalin');
+    showToast('✓ Disalin (' + text.length + ' karakter)');
   } catch (e) {
     console.error('[RecallFox] copyItem error:', e);
     showToast('Gagal salin: ' + e.message);
@@ -652,10 +671,10 @@ function openItemMenuSheet(itemId) {
     const body = sheet.querySelector('#itemMenuBody');
     body.innerHTML = `
       <h3 style="margin-bottom:8px;font-size:15px">${typeLabel} · ${title}</h3>
+      <button class="sheet-btn" data-action="copy">📋 Salin ke Clipboard</button>
       <button class="sheet-btn" data-action="edit">✏️ Edit Judul & Isi</button>
       <button class="sheet-btn" data-action="pin">${pinned ? '📌 Lepas Sematan' : '📌 Sematkan ke Atas'}</button>
       <button class="sheet-btn" data-action="move">📂 Pindahkan ke Folder...</button>
-      <button class="sheet-btn" data-action="copy">📋 Salin Teks</button>
       <button class="sheet-btn" data-action="fav">${item.favorite ? '⭐ Lepas Favorit' : '⭐ Tandai Favorit'}</button>
       <button class="sheet-btn" data-action="archive">${item.archived ? '📤 Keluarkan dari Arsip' : '📦 Arsipkan'}</button>
       ${item.type === 'screenshot' || item.type === 'document' ? '<button class="sheet-btn" data-action="annot">📝 Edit Catatan Anotasi</button>' : ''}
@@ -1221,6 +1240,12 @@ function openEditItemSheet(itemId) {
 
     const body = sheet.querySelector('#editItemBody');
     const tagsStr = Array.isArray(item.tags) ? item.tags.join(', ') : (item.tags || '');
+    // v1.12.0: Folder dropdown — list semua folder (group items)
+    const allFolders = items.filter(i => isGroupItem(i) && !i.archived && i.id !== itemId);
+    const currentParent = getParentId(item);
+    const folderOptions = ['<option value="">📁 Root (top-level)</option>']
+      .concat(allFolders.map(f => '<option value="' + f.id + '"' + (currentParent === f.id ? ' selected' : '') + '>📁 ' + escapeHtml(f.title || 'Folder') + '</option>'))
+      .join('');
     body.innerHTML = `
       <h3 style="margin-bottom:12px;font-size:15px">✏️ Edit Item</h3>
       <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;font-weight:600">Judul</label>
@@ -1231,7 +1256,11 @@ function openEditItemSheet(itemId) {
         style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:13px;box-sizing:border-box;margin-bottom:10px;font-family:monospace;resize:vertical">${escapeHtml(item.body || '')}</textarea>
       <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;font-weight:600">Tag (pisahkan dengan koma)</label>
       <input id="editTags" type="text" value="${escapeHtml(tagsStr)}" placeholder="tag1, tag2..."
-        style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:14px;box-sizing:border-box;margin-bottom:14px">
+        style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:14px;box-sizing:border-box;margin-bottom:10px">
+      <label style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;font-weight:600">Folder</label>
+      <select id="editFolder" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;font-size:14px;box-sizing:border-box;margin-bottom:14px">
+        ${folderOptions}
+      </select>
       <div style="display:flex;gap:8px">
         <button class="btn btn-ghost" id="editCancel" style="flex:1;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">Batal</button>
         <button class="btn btn-primary" id="editSave" style="flex:1;padding:10px;background:var(--primary);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer">Simpan</button>
@@ -1244,15 +1273,23 @@ function openEditItemSheet(itemId) {
       const bodyText = body.querySelector('#editBody').value;
       const tagsText = body.querySelector('#editTags').value.trim();
       const tags = tagsText ? tagsText.split(',').map(t => t.trim()).filter(Boolean) : [];
+      const folderId = body.querySelector('#editFolder').value || null;
       close();
       try {
+        // v1.12.0: Update folder (parentId) kalau berubah
+        const updates = { title: title || 'Untitled', body: bodyText, tags: tags };
+        if (folderId !== currentParent) {
+          if (!item.source) item.source = {};
+          item.source.parentId = folderId || null;
+          updates.source = item.source;
+        }
         // Update lokal instan
         item.title = title || 'Untitled';
         item.body = bodyText;
         item.tags = tags;
         await dbPutVaultItem(item);
         // Update cloud
-        await updateVaultItem(window.__rfUser, itemId, { title: item.title, body: item.body, tags: item.tags });
+        await updateVaultItem(window.__rfUser, itemId, updates);
         showToast('✓ Tersimpan');
         renderList();
       } catch (e) {
