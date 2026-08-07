@@ -602,14 +602,41 @@ async function copyItem(id) {
     const items = await dbGetAllVaultItems();
     const item = items.find(i => i.id === id);
     if (!item) return;
-    // v1.12.0: Type-aware copy — link→URL, file→body (isi teks), lainnya→body
+
+    // v1.12.1: Bundle — salin SEMUA ISI anggota, bukan hanya judul bundle.
+    // Sebelumnya: bundle masuk ke else branch → copy item.body (kosong) →
+    // fallback ke item.title (14 karakter). Itu sebabnya toast selalu bilang
+    // "Disalin (14 karakter)" meskipun bundle berisi puluhan item.
+    //
+    // Format output:
+    //   --- BUNDLE: <judul bundle> (N item) ---
+    //
+    //   --- PROMPT: <judul item> ---
+    //   <body prompt>
+    //
+    //   --- LINK: <judul link> ---
+    //   <url link>
+    //
+    //   --- FILE: <judul file> ---
+    //   <body file>
+    //   ...
+    //
+    // Item orphan (ID di item_ids tapi tidak ada di vault) di-skip silent.
     let text = '';
-    if (item.type === 'link') {
+    if (item.type === 'bundle') {
+      text = buildBundleContent(item, items);
+    } else if (item.type === 'link') {
+      // v1.12.0: Type-aware copy — link→URL, file→body (isi teks), lainnya→body
       text = item.link_url || item.linkUrl || item.body || item.title || '';
     } else if (item.type === 'file') {
       text = item.body || item.title || '';
     } else {
       text = item.body || item.note || item.title || '';
+    }
+
+    if (!text) {
+      showToast('Item kosong — tidak ada yang disalin', false);
+      return;
     }
     await navigator.clipboard.writeText(text);
     showToast('✓ Disalin (' + text.length + ' karakter)');
@@ -617,6 +644,75 @@ async function copyItem(id) {
     console.error('[RecallFox] copyItem error:', e);
     showToast('Gagal salin: ' + e.message);
   }
+}
+
+// v1.12.1: buildBundleContent — kumpulkan semua anggota bundle jadi 1 string
+// rapi siap-paste. Pakai label tipe dari TYPE_LABELS supaya konsisten dengan UI.
+//
+// Parameter:
+//   bundle  — item vault dengan type='bundle', punya field item_ids (array ID)
+//   allItems — array semua vault items (untuk lookup anggota by ID)
+//
+// Return: string siap-paste. Empty string kalau bundle tidak punya anggota valid.
+function buildBundleContent(bundle, allItems) {
+  if (!bundle) return '';
+  const memberIds = Array.isArray(bundle.item_ids) ? bundle.item_ids :
+                    Array.isArray(bundle.itemIds) ? bundle.itemIds : [];
+  if (memberIds.length === 0) {
+    return '';
+  }
+
+  // Lookup anggota by ID. Skip orphan (ID tidak ada di vault) supaya tidak
+  // muncul sebagai "--- ITEM: undefined ---" di output.
+  const lookup = new Map();
+  for (const it of allItems) {
+    if (it && it.id) lookup.set(it.id, it);
+  }
+  const members = [];
+  for (const mid of memberIds) {
+    const m = lookup.get(mid);
+    if (m) members.push(m);
+  }
+  if (members.length === 0) {
+    return '';
+  }
+
+  const bundleTitle = (bundle.title || 'Bundle').trim();
+  const lines = [];
+  lines.push(`--- BUNDLE: ${bundleTitle} (${members.length} item) ---`);
+  lines.push('');
+
+  for (const m of members) {
+    const typeInfo = TYPE_LABELS[m.type] || { label: m.type || 'Item', icon: '📄' };
+    const memberTitle = (m.title || 'Tanpa judul').trim();
+    // Header per item — format: "--- PROMPT: judul ---"
+    lines.push(`--- ${typeInfo.label.toUpperCase()}: ${memberTitle} ---`);
+
+    // Isi item — type-aware (sama logic dengan copyItem non-bundle)
+    let body = '';
+    if (m.type === 'link') {
+      body = m.link_url || m.linkUrl || m.body || '';
+    } else if (m.type === 'file') {
+      body = m.body || '';
+    } else if (m.type === 'context' || m.type === 'prompt' || m.type === 'snapshot') {
+      body = m.body || m.note || '';
+    } else if (m.type === 'screenshot' || m.type === 'document') {
+      // Screenshot punya annotation_note di source. Body biasanya kosong.
+      body = m.body || m.source?.annotationNote || m.annotation_note || '';
+      if (!body && m.link_url) body = m.link_url; // beberapa document punya URL
+    } else {
+      body = m.body || m.note || '';
+    }
+
+    if (body && body.trim()) {
+      lines.push(body.trim());
+    } else {
+      lines.push('(kosong)');
+    }
+    lines.push(''); // baris kosong pemisah antar item
+  }
+
+  return lines.join('\n').trim();
 }
 
 function confirmDelete(id) {
