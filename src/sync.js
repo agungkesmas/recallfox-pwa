@@ -18,7 +18,7 @@
 //   - Insert ke tabel screenshots supaya konsisten dengan addon (sebelumnya
 //     PWA hanya insert ke vault_items).
 
-import { supabase, STORAGE_BUCKET, VAULT_TABLE, NOTES_TABLE } from './supabase.js';
+import { supabase, STORAGE_BUCKET, DOCUMENTS_BUCKET, VAULT_TABLE, NOTES_TABLE } from './supabase.js';
 import {
   dbGetAllVaultItems, dbPutVaultItem, dbDeleteVaultItem,
   dbGetAllNotes, dbPutNote, dbDeleteNote,
@@ -518,6 +518,78 @@ export async function createScreenshotItem(user, payload) {
     storageError,
     upsertError
   };
+}
+
+// v1.13.0: createFileItem — Upload file teks ke Supabase Storage + insert vault_items
+// Mirror addon _uploadFileDocument + addItem flow.
+// payload: { title, body, tags, source: { kind, mime, fileName, size, uploadedFrom, capturedAt } }
+export async function createFileItem(user, payload) {
+  const itemId = genId('f');
+  const now = new Date().toISOString();
+  console.log('[RecallFox] createFileItem START:', itemId, 'user:', user?.id, 'fileName:', payload.source?.fileName);
+
+  const kind = payload.source?.kind || 'txt';
+  const mime = payload.source?.mime || 'text/plain';
+  const extMap = { md: 'md', txt: 'txt', json: 'json', html: 'html', csv: 'csv', yaml: 'yaml' };
+  const ext = extMap[kind] || 'txt';
+  const path = `user-${user.id}/${itemId}.${ext}`;
+  const blob = new Blob([payload.body], { type: mime });
+
+  // Step 1: Upload blob to Storage bucket 'documents'
+  let storageUrl = null;
+  let storageOk = false;
+  try {
+    const { error: upErr } = await supabase.storage.from(DOCUMENTS_BUCKET).upload(path, blob, { contentType: mime, upsert: true });
+    if (upErr) {
+      console.warn('[RecallFox] File upload to Storage FAILED:', upErr.message);
+    } else {
+      storageUrl = `${supabase.supabaseUrl}/storage/v1/object/public/${DOCUMENTS_BUCKET}/${path}`;
+      storageOk = true;
+      console.log('[RecallFox] File upload OK, URL:', storageUrl);
+    }
+  } catch (e) {
+    console.warn('[RecallFox] File upload exception:', e.message);
+  }
+
+  // Step 2: Insert vault_items row
+  const row = {
+    id: itemId,
+    user_id: user.id,
+    type: 'file',
+    title: payload.title || payload.source?.fileName || 'File Upload',
+    body: payload.body || '',
+    tags: payload.tags || ['file', kind],
+    category: null,
+    source: payload.source || null,
+    gdrive_file_id: storageOk ? path : null,
+    gdrive_file_url: storageOk ? storageUrl : null,
+    favorite: false,
+    archived: false,
+    use_count: 0,
+    created_at: now,
+    updated_at: now
+  };
+
+  try {
+    const { error: insertErr } = await supabase.from(VAULT_TABLE).upsert(row);
+    if (insertErr) {
+      console.error('[RecallFox] createFileItem insert error:', insertErr.message);
+      return { ok: false, error: insertErr.message };
+    }
+  } catch (e) {
+    console.error('[RecallFox] createFileItem insert exception:', e.message);
+    return { ok: false, error: e.message };
+  }
+
+  // Step 3: Cache to IndexedDB
+  try {
+    await dbPutVaultItem({ ...row, gdriveFileId: row.gdrive_file_id, gdriveFileUrl: row.gdrive_file_url });
+  } catch (e) {
+    console.warn('[RecallFox] createFileItem: IndexedDB cache failed (not fatal):', e.message);
+  }
+
+  console.log('[RecallFox] createFileItem OK:', itemId, 'storageOk:', storageOk);
+  return { ok: true, itemId, storageOk, storageUrl };
 }
 
 export async function deleteVaultItem(user, itemId) {

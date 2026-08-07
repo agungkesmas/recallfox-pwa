@@ -13,7 +13,7 @@ import './styles/components.css';
 import './styles/views.css';
 
 import { getSession, onAuthChange, handleOAuthCallback } from './auth.js';
-import { pullFromCloud, subscribeRealtime, unsubscribeRealtime, processSyncQueue } from './sync.js';
+import { pullFromCloud, subscribeRealtime, unsubscribeRealtime, processSyncQueue, createFileItem } from './sync.js';
 import { renderLogin, renderForgotPassword, renderResetPassword } from './views/login.js';
 import { renderMedia, startCaptureFlow, startDocumentFlow } from './views/media.js';
 import { renderNotes, openNoteEditor } from './views/notes.js';
@@ -293,6 +293,7 @@ function openFabMenu() {
       <button class="sheet-btn" data-action="gallery">🖼️ Dari Galeri</button>
       <button class="sheet-btn" data-action="document">📄 Scan Dokumen</button>
       <button class="sheet-btn" data-action="paste">📋 Paste dari Clipboard</button>
+      <button class="sheet-btn" data-action="upload-file">📄 Upload File Teks</button>
       <button class="sheet-btn" data-action="note">📝 Catatan Baru</button>
       <button class="sheet-btn" data-action="folder">📁 Folder Baru</button>
       <button class="sheet-btn cancel" data-action="cancel">Batal</button>
@@ -310,8 +311,126 @@ function openFabMenu() {
     else if (action === 'gallery') startCaptureFlow('gallery');
     else if (action === 'document') startDocumentFlow('camera');
     else if (action === 'paste') startCaptureFlow('paste');
+    else if (action === 'upload-file') openFileUploadSheet();
     else if (action === 'note') { navigateTo('notes'); setTimeout(openNoteEditor, 100); }
     else if (action === 'folder') { navigateTo('vault'); setTimeout(() => handleCreateFolder(), 100); }
+  });
+}
+
+// v1.13.0: Upload File Teks — modal standar (mirror addon saveFileUploadSheet)
+function openFileUploadSheet() {
+  const sheet = document.createElement('div');
+  sheet.className = 'bottom-sheet';
+  sheet.innerHTML = `
+    <div class="sheet-backdrop"></div>
+    <div class="sheet-content">
+      <div class="sheet-handle"></div>
+      <h3>📄 Upload File Teks</h3>
+      <div style="padding:0 4px">
+        <label style="font-size:12px;font-weight:600;color:var(--text-muted)">Judul <span style="font-weight:400">(opsional)</span></label>
+        <input type="text" id="fileTitle" placeholder="mis. Catatan rapat..." style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin:4px 0 12px;font-size:14px;background:var(--surface);color:var(--text)">
+        <label style="font-size:12px;font-weight:600;color:var(--text-muted)">Tag <span style="font-weight:400">(pisah koma)</span></label>
+        <input type="text" id="fileTags" placeholder="catatan, rapat" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin:4px 0 12px;font-size:14px;background:var(--surface);color:var(--text)">
+        <div id="fileDropzone" style="border:2px dashed var(--border-strong);border-radius:12px;padding:32px 16px;text-align:center;cursor:pointer;transition:border-color 0.2s,background 0.2s">
+          <div style="font-size:40px;margin-bottom:8px">📄</div>
+          <div style="font-weight:600;color:var(--text)">Klik untuk pilih file</div>
+          <div style="font-size:12px;margin-top:4px;color:var(--text-muted)">atau drag & drop</div>
+          <div style="font-size:11px;margin-top:4px;color:var(--text-subtle)">Format: .md, .txt, .json, .html, .csv, .yaml (max 2MB)</div>
+        </div>
+        <input type="file" id="fileInputHidden" accept=".md,.markdown,.txt,.json,.html,.htm,.csv,.yaml,.yml" style="display:none">
+        <div id="filePreview" style="display:none;margin:12px 0">
+          <div style="font-size:12px;color:var(--text-muted)" id="filePreviewMeta"></div>
+          <div id="filePreviewText" style="font-size:11px;background:var(--surface-2);padding:8px 10px;border-radius:6px;margin-top:4px;max-height:120px;overflow-y:auto;white-space:pre-wrap;font-family:monospace"></div>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:16px">
+          <button class="btn btn-secondary" id="fileCancel" style="flex:1">Batal</button>
+          <button class="btn btn-primary" id="fileSave" style="flex:1" disabled>Simpan File</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(sheet);
+  setTimeout(() => sheet.classList.add('open'), 10);
+
+  const FILE_WHITELIST = {
+    '.md': { kind: 'md', mime: 'text/markdown' },
+    '.markdown': { kind: 'md', mime: 'text/markdown' },
+    '.txt': { kind: 'txt', mime: 'text/plain' },
+    '.json': { kind: 'json', mime: 'application/json' },
+    '.html': { kind: 'html', mime: 'text/html' },
+    '.htm': { kind: 'html', mime: 'text/html' },
+    '.csv': { kind: 'csv', mime: 'text/csv' },
+    '.yaml': { kind: 'yaml', mime: 'text/yaml' },
+    '.yml': { kind: 'yaml', mime: 'text/yaml' }
+  };
+  const MAX_BYTES = 2 * 1024 * 1024;
+  let _fileContent = null, _fileName = '', _fileKind = null, _fileMime = 'text/plain';
+
+  const dropzone = sheet.querySelector('#fileDropzone');
+  const fileInput = sheet.querySelector('#fileInputHidden');
+
+  function closeSheet() { sheet.remove(); }
+
+  function detectKind(name) {
+    const dot = name.lastIndexOf('.');
+    if (dot < 0) return null;
+    return FILE_WHITELIST[name.slice(dot).toLowerCase()] || null;
+  }
+
+  async function handleFile(file) {
+    const info = detectKind(file.name);
+    if (!info) { alert('Format tidak didukung: ' + file.name); return; }
+    if (file.size > MAX_BYTES) { alert('File terlalu besar (max 2MB)'); return; }
+    const text = await file.text();
+    if (!text || text.length === 0) { alert('File kosong'); return; }
+    _fileContent = text; _fileName = file.name; _fileKind = info.kind; _fileMime = info.mime;
+    const meta = sheet.querySelector('#filePreviewMeta');
+    const preview = sheet.querySelector('#filePreviewText');
+    const box = sheet.querySelector('#filePreview');
+    const sizeKb = (file.size / 1024).toFixed(1);
+    meta.textContent = '📎 ' + file.name + ' · ' + sizeKb + ' KB · ' + info.kind;
+    preview.textContent = text.slice(0, 500) + (text.length > 500 ? '\n... (' + text.length + ' chars)' : '');
+    box.style.display = '';
+    sheet.querySelector('#fileSave').disabled = false;
+    const titleEl = sheet.querySelector('#fileTitle');
+    if (!titleEl.value.trim()) titleEl.value = file.name.replace(/\.[^.]+$/, '').slice(0, 60);
+  }
+
+  dropzone.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', async (e) => { if (e.target.files[0]) await handleFile(e.target.files[0]); });
+  dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.style.borderColor = 'var(--primary)'; dropzone.style.background = 'var(--primary-soft)'; });
+  dropzone.addEventListener('dragleave', () => { dropzone.style.borderColor = 'var(--border-strong)'; dropzone.style.background = ''; });
+  dropzone.addEventListener('drop', async (e) => { e.preventDefault(); dropzone.style.borderColor = 'var(--border-strong)'; dropzone.style.background = ''; if (e.dataTransfer.files[0]) await handleFile(e.dataTransfer.files[0]); });
+
+  sheet.querySelector('#fileCancel').addEventListener('click', closeSheet);
+  sheet.querySelector('.sheet-backdrop').addEventListener('click', closeSheet);
+
+  sheet.querySelector('#fileSave').addEventListener('click', async () => {
+    if (!_fileContent) { alert('Pilih file dulu'); return; }
+    const user = window.__rfUser;
+    if (!user) { alert('Belum login'); return; }
+    const title = (sheet.querySelector('#fileTitle').value || '').trim() || _fileName;
+    const tags = (sheet.querySelector('#fileTags').value || '').trim();
+    const tagList = tags ? tags.split(',').map(s => s.trim()).filter(Boolean) : ['file', _fileKind];
+    const btn = sheet.querySelector('#fileSave');
+    btn.textContent = '⏳ Menyimpan...'; btn.disabled = true;
+    try {
+      const result = await createFileItem(user, {
+        title, body: _fileContent, tags: tagList,
+        source: { kind: _fileKind, mime: _fileMime, fileName: _fileName, size: _fileContent.length, uploadedFrom: 'pwa-upload', capturedAt: new Date().toISOString() }
+      });
+      if (result.ok) {
+        closeSheet();
+        navigateTo('vault');
+        setTimeout(() => alert('📤 ' + _fileName + ' tersimpan ✓'), 100);
+      } else {
+        alert('⚠ Gagal simpan: ' + (result.error || 'unknown'));
+        btn.textContent = 'Simpan File'; btn.disabled = false;
+      }
+    } catch (e) {
+      alert('⚠ Error: ' + e.message);
+      btn.textContent = 'Simpan File'; btn.disabled = false;
+    }
   });
 }
 

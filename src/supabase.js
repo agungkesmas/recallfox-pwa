@@ -19,5 +19,6 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 });
 
 export const STORAGE_BUCKET = 'screenshots';
+export const DOCUMENTS_BUCKET = 'documents';
 export const VAULT_TABLE = 'vault_items';
 export const NOTES_TABLE = 'notes';
