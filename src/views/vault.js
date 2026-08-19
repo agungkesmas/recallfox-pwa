@@ -17,6 +17,8 @@ import {
   buildTree, isGroupItem, getParentId, setParentId,
   isPinned, setPinned, createGroup
 } from '../lib/vault-tree.js';
+// v1.13.1: buildBundleMediaReport — format "Salin Link + Keterangan" untuk bundle (FASE 3)
+import { buildBundleMediaReport } from '../copy-format.js';
 
 let _batchMode = false;
 let _batchSelected = new Set();
@@ -768,6 +770,7 @@ function openItemMenuSheet(itemId) {
     body.innerHTML = `
       <h3 style="margin-bottom:8px;font-size:15px">${typeLabel} · ${title}</h3>
       <button class="sheet-btn" data-action="copy">📋 Salin ke Clipboard</button>
+      ${item.type === 'bundle' ? '<button class="sheet-btn" data-action="copy-link-caption">📋 Salin Link + Keterangan</button>' : ''}
       <button class="sheet-btn" data-action="edit">✏️ Edit Judul & Isi</button>
       <button class="sheet-btn" data-action="pin">${pinned ? '📌 Lepas Sematan' : '📌 Sematkan ke Atas'}</button>
       <button class="sheet-btn" data-action="move">📂 Pindahkan ke Folder...</button>
@@ -787,6 +790,7 @@ function openItemMenuSheet(itemId) {
           if (action === 'pin') await togglePin(itemId);
           else if (action === 'move') openMoveToFolderSheet(itemId);
           else if (action === 'copy') copyItem(itemId);
+          else if (action === 'copy-link-caption') await copyBundleLinkCaption(itemId);
           else if (action === 'fav') toggleFavorite(itemId);
           else if (action === 'archive') toggleArchiveItem(itemId);
           else if (action === 'edit') openEditItemSheet(itemId);
@@ -796,6 +800,58 @@ function openItemMenuSheet(itemId) {
       });
     });
   })();
+}
+
+// v1.13.1: copyBundleLinkCaption — Salin Link Cloud + Keterangan per-media untuk bundle
+// FASE 3: Format Markdown terstruktur untuk AI Agent.
+// Anti-freeze: async + try-catch + null-safety (per protokol spec).
+async function copyBundleLinkCaption(bundleId) {
+  try {
+    const allItems = await dbGetAllVaultItems();
+    const bundle = allItems.find(i => i.id === bundleId);
+    if (!bundle || bundle.type !== 'bundle') {
+      showToast('Bundle tidak ditemukan');
+      return;
+    }
+    // Ambil anggota bundle
+    const memberIds = bundle.itemIds || [];
+    const noteIds = bundle.noteIds || [];
+    const memberItems = memberIds.map(id => allItems.find(i => i.id === id)).filter(Boolean);
+    // Notes: di PWA, notes disimpan terpisah di object store 'notes'. Coba ambil dari window.__rfNotesCache
+    // atau fallback ke empty array (buildBundleMediaReport handle null safely).
+    let memberNotes = [];
+    if (noteIds.length > 0 && typeof window !== 'undefined' && window.__rfAllNotes) {
+      memberNotes = noteIds.map(id => window.__rfAllNotes.find(n => n.id === id)).filter(Boolean);
+    }
+    const markdown = buildBundleMediaReport(bundle, memberItems, memberNotes);
+    if (!markdown) {
+      showToast('Bundle kosong — tidak ada yang disalin');
+      return;
+    }
+    // Copy ke clipboard
+    try {
+      await navigator.clipboard.writeText(markdown);
+      showToast('📋 Link + Keterangan tersalin (' + markdown.length + ' karakter)');
+    } catch (e) {
+      // Fallback: execCommand
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = markdown;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        showToast('📋 Link + Keterangan tersalin (' + markdown.length + ' karakter)');
+      } catch (e2) {
+        showToast('⚠ Gagal salin: ' + e2.message);
+      }
+    }
+  } catch (err) {
+    console.error('[RecallFox] copyBundleLinkCaption failed:', err);
+    showToast('⚠ Gagal: ' + (err && err.message ? err.message : 'unknown error'));
+  }
 }
 
 // ============================================================
