@@ -13,6 +13,36 @@ import { dbGetAllVaultItems, dbPutVaultItem, dbDeleteVaultItem } from '../db.js'
 import { deleteVaultItem, updateVaultItem } from '../sync.js';
 // v1.10.0: Folder ops — rename/archive/delete/move dengan guards anti-crash.
 import { renameFolder, archiveFolder, deleteFolder, moveFolder, cleanupOrphanFolders, findOrphanFolders } from '../lib/folder-ops.js';
+
+// v1.13.4: Helper parse array fleksibel — handle camelCase, snake_case, dan JSON string.
+// Root cause bug "bundle members terhapus": data dari DB/Supabase tersimpan sebagai
+// String JSON ('["id1","id2"]'). Array.isArray(string) → false → memberIds = [].
+// Fix: helper ini coba parse dari berbagai bentuk sebelum fallback ke [].
+function _parseArrayField(obj, ...keys) {
+  for (const k of keys) {
+    if (obj[k] === undefined || obj[k] === null) continue;
+    if (Array.isArray(obj[k])) return obj[k];
+    if (typeof obj[k] === 'string') {
+      const trimmed = obj[k].trim();
+      if (trimmed === '') continue;
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) return parsed;
+      } catch (e) {
+        if (trimmed.includes(',')) {
+          const parts = trimmed.split(',').map(s => s.trim()).filter(Boolean);
+          if (parts.length > 0) return parts;
+        }
+        return [trimmed];
+      }
+    }
+    if (typeof obj[k] === 'object' && obj[k] !== null) {
+      if (Array.isArray(obj[k].items)) return obj[k].items;
+      if (Array.isArray(obj[k].data)) return obj[k].data;
+    }
+  }
+  return [];
+}
 import {
   buildTree, isGroupItem, getParentId, setParentId,
   isPinned, setPinned, createGroup
@@ -555,10 +585,13 @@ function renderItemCard(item, indent = 0) {
   }
 
   // Untuk bundle, tampilkan jumlah item
+  // v1.13.4: Pakai parseArrayField untuk handle JSON string dari DB/Supabase.
   let bundleInfo = '';
-  if (item.type === 'bundle' && item.item_ids) {
-    const count = Array.isArray(item.item_ids) ? item.item_ids.length : 0;
-    bundleInfo = `<div class="item-meta">📦 ${count} item</div>`;
+  if (item.type === 'bundle') {
+    const ids = _parseArrayField(item, 'item_ids', 'itemIds');
+    if (ids.length > 0) {
+      bundleInfo = `<div class="item-meta">📦 ${ids.length} item</div>`;
+    }
   }
 
   return `
@@ -660,8 +693,8 @@ async function copyItem(id) {
 // Return: string siap-paste. Empty string kalau bundle tidak punya anggota valid.
 function buildBundleContent(bundle, allItems) {
   if (!bundle) return '';
-  const memberIds = Array.isArray(bundle.item_ids) ? bundle.item_ids :
-                    Array.isArray(bundle.itemIds) ? bundle.itemIds : [];
+  // v1.13.4: Pakai _parseArrayField untuk handle JSON string dari DB/Supabase.
+  const memberIds = _parseArrayField(bundle, 'item_ids', 'itemIds');
   if (memberIds.length === 0) {
     return '';
   }
@@ -823,12 +856,9 @@ async function copyBundleLinkCaption(bundleId) {
       showToast('Bundle tidak ditemukan');
       return;
     }
-    // v1.13.2 FIX: PWA pakai item_ids (snake_case). Fallback ke itemIds (addon style)
-    // untuk backward compat kalau bundle di-sync dari addon.
-    const memberIds = Array.isArray(bundle.item_ids) ? bundle.item_ids :
-                      Array.isArray(bundle.itemIds) ? bundle.itemIds : [];
-    const noteIds = Array.isArray(bundle.note_ids) ? bundle.note_ids :
-                    Array.isArray(bundle.noteIds) ? bundle.noteIds : [];
+    // v1.13.4: Pakai _parseArrayField untuk handle JSON string dari DB/Supabase.
+    const memberIds = _parseArrayField(bundle, 'item_ids', 'itemIds');
+    const noteIds = _parseArrayField(bundle, 'note_ids', 'noteIds');
     // Lookup anggota by ID dari allItems (sama seperti buildBundleContent line 669-677).
     const lookup = new Map();
     for (const it of allItems) {
