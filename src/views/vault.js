@@ -40,10 +40,11 @@ const TYPE_LABELS = {
   snapshot: { label: 'Snapshot', icon: '📸', color: '#8b5cf6' },
   link: { label: 'Link', icon: '🔗', color: '#f59e0b' },
   bundle: { label: 'Bundle', icon: '📦', color: '#ec4899' },
-  file: { label: 'File', icon: '📄', color: '#6366f1' }
+  file: { label: 'File', icon: '📄', color: '#6366f1' },
+  document: { label: 'Dokumen', icon: '📄', color: '#0891b2' }
 };
 
-const TEXT_TYPES = ['prompt', 'context', 'snapshot', 'link', 'bundle', 'file'];
+const TEXT_TYPES = ['prompt', 'context', 'snapshot', 'link', 'bundle', 'file', 'document'];
 
 export function renderVault(user, onRefresh) {
   _onRefresh = onRefresh;
@@ -70,6 +71,7 @@ export function renderVault(user, onRefresh) {
         <option value="link">🔗 Link</option>
         <option value="bundle">📦 Bundle</option>
         <option value="file">📄 File</option>
+        <option value="document">📄 Dokumen</option>
       </select>
       <select id="vaultSortBy" title="Urutkan">
         <option value="recent">Terbaru</option>
