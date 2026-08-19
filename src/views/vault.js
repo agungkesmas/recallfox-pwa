@@ -805,6 +805,14 @@ function openItemMenuSheet(itemId) {
 // v1.13.1: copyBundleLinkCaption — Salin Link Cloud + Keterangan per-media untuk bundle
 // FASE 3: Format Markdown terstruktur untuk AI Agent.
 // Anti-freeze: async + try-catch + null-safety (per protokol spec).
+//
+// v1.13.2 FIX: PWA simpan bundle sebagai vault item (type='bundle') dengan:
+//   - bundle.title (BUKAN bundle.name seperti addon)
+//   - bundle.item_ids (snake_case, BUKAN bundle.itemIds seperti addon)
+//   - bundle.note_ids (snake_case, BUKAN bundle.noteIds)
+// Sebelumnya copyBundleLinkCaption pakai bundle.itemIds → kosong → totalItems=0.
+// Fix: pakai bundle.item_ids (dengan fallback ke itemIds untuk backward compat).
+// buildBundleMediaReport juga di-fix untuk baca bundle.title sebagai fallback name.
 async function copyBundleLinkCaption(bundleId) {
   try {
     const allItems = await dbGetAllVaultItems();
@@ -813,10 +821,18 @@ async function copyBundleLinkCaption(bundleId) {
       showToast('Bundle tidak ditemukan');
       return;
     }
-    // Ambil anggota bundle
-    const memberIds = bundle.itemIds || [];
-    const noteIds = bundle.noteIds || [];
-    const memberItems = memberIds.map(id => allItems.find(i => i.id === id)).filter(Boolean);
+    // v1.13.2 FIX: PWA pakai item_ids (snake_case). Fallback ke itemIds (addon style)
+    // untuk backward compat kalau bundle di-sync dari addon.
+    const memberIds = Array.isArray(bundle.item_ids) ? bundle.item_ids :
+                      Array.isArray(bundle.itemIds) ? bundle.itemIds : [];
+    const noteIds = Array.isArray(bundle.note_ids) ? bundle.note_ids :
+                    Array.isArray(bundle.noteIds) ? bundle.noteIds : [];
+    // Lookup anggota by ID dari allItems (sama seperti buildBundleContent line 669-677).
+    const lookup = new Map();
+    for (const it of allItems) {
+      if (it && it.id) lookup.set(it.id, it);
+    }
+    const memberItems = memberIds.map(id => lookup.get(id)).filter(Boolean);
     // Notes: di PWA, notes disimpan terpisah di object store 'notes'. Coba ambil dari window.__rfNotesCache
     // atau fallback ke empty array (buildBundleMediaReport handle null safely).
     let memberNotes = [];
