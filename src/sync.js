@@ -1,0 +1,1425 @@
+// src/sync.js — Sync engine: upload/download ke Supabase + Realtime subscription
+// Strategi: online-first (langsung upload ke cloud), IndexedDB sebagai cache
+// untuk offline read + queue upload yang gagal.
+//
+// v1.2.0 FIX:
+//   - BUG #1: pullFromCloud sekarang cache blob screenshot ke IndexedDB (background,
+//     non-blocking) supaya getOrDownloadScreenshotBlob bisa ambil dari local saat
+//     openItemDetail. Sebelumnya hanya metadata yang di-cache, jadi fetch cloud
+//     URL yang gagal di mobile → paste kosong.
+//   - BUG #2: createScreenshotItem sekarang return ok:false kalau upload Storage
+//     ATAU upsert vault_items gagal. UI bisa tampilkan toast akurat ke user.
+//     Sebelumnya selalu ok:true meski gagal → user pikir "tersimpan" padahal cuma
+//     di IndexedDB lokal.
+//   - BUG #2: pullFromCloud sekarang JANGAN hapus item lokal yang device_id-nya
+//     cocok dengan device ini (item yang baru dibuat di sini tapi belum sync).
+//     Sebelumnya setelah 60s item lokal dihapus → user lihat "tidak terjadi
+//     apa-apa".
+//   - Insert ke tabel screenshots supaya konsisten dengan addon (sebelumnya
+//     PWA hanya insert ke vault_items).
+
+import { supabase, STORAGE_BUCKET, DOCUMENTS_BUCKET, VAULT_TABLE, NOTES_TABLE } from './supabase.js';
+import {
+  dbGetAllVaultItems, dbPutVaultItem, dbDeleteVaultItem,
+  dbGetAllNotes, dbPutNote, dbDeleteNote,
+  dbGetScreenshotBlob, dbPutScreenshotBlob, dbDeleteScreenshotBlob,
+  dbEnqueueSync, dbGetSyncQueue, dbDeleteSyncQueueItem
+} from './db.js';
+// v1.11.0: Delete registry — lock item yang sudah dihapus supaya tidak re-appear.
+import {
+  addToDeleteRegistry, addNoteToDeleteRegistry,
+  isInDeleteRegistry, isNoteInDeleteRegistry,
+  removeFromDeleteRegistry, removeNoteFromDeleteRegistry,
+  cleanupDeleteRegistry, getDeletedItemIds, getDeletedNoteIds
+} from './lib/delete-registry.js';
+
+const SCREENSHOTS_TABLE = 'screenshots';
+
+// ===== Helpers =====
+function genId(prefix = 'p') {
+  return prefix + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+// v1.5.1: Promise timeout — supaya operasi Supabase/Storage yang hang
+// tidak nge-block save flow selamanya. Sebelumnya await supabase.upsert()
+// bisa hang tanpa limit → IndexedDB write (yang ada SETELAH upsert) tidak
+// pernah dieksekusi → user lihat "tidak ada jejak save apapun di media".
+//
+// Pemakaian: await withTimeout(supabase.from(t).upsert(row), 20000, 'vault_upsert')
+export function withTimeout(promise, ms, label = 'op') {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => {
+      reject(new Error(label + ' timeout after ' + ms + 'ms'));
+    }, ms);
+    Promise.resolve(promise).then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); }
+    );
+  });
+}
+
+export function getDeviceId() {
+  let id = localStorage.getItem('recallfox_pwa_device_id');
+  if (!id) {
+    id = 'pwa_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+    localStorage.setItem('recallfox_pwa_device_id', id);
+  }
+  return id;
+}
+
+// v1.6.3: withAuthRetry — wrap Supabase calls supaya kalau 401 (session expired),
+// coba refresh session sekali lalu retry. Sebelumnya: 401 silent fail → data tidak
+// sync tanpa user tahu. Sekarang: refresh + retry, kalau masih gagal → sign out.
+export async function withAuthRetry(supabaseCall) {
+  try {
+    const result = await supabaseCall;
+    // Check for 401 in error
+    if (result.error && (result.error.code === 'PGRST301' || result.error.message?.includes('JWT') || result.error.message?.includes('401'))) {
+      console.warn('[RecallFox] 401 detected, refreshing session...');
+      const { supabase } = await import('./supabase.js');
+      const { data: refreshData, error: refreshErr } = await supabase.auth.refreshSession();
+      if (refreshErr || !refreshData.session) {
+        console.error('[RecallFox] Session refresh failed, signing out:', refreshErr?.message);
+        await supabase.auth.signOut();
+        return result; // return original error
+      }
+      console.log('[RecallFox] Session refreshed, retrying call...');
+      // Retry the call with refreshed session — re-execute the factory
+      if (typeof supabaseCall === 'function') {
+        return await supabaseCall();
+      }
+      // If it was a promise (not a factory), we can't retry — return original
+      return result;
+    }
+    return result;
+  } catch (e) {
+    if (e.message?.includes('401') || e.message?.includes('JWT')) {
+      console.warn('[RecallFox] 401 exception, refreshing session...');
+      try {
+        const { supabase } = await import('./supabase.js');
+        const { error: refreshErr } = await supabase.auth.refreshSession();
+        if (refreshErr) {
+          await supabase.auth.signOut();
+        }
+      } catch (re) { /* ignore */ }
+    }
+    throw e;
+  }
+}
+
+// v1.6.3: Cleanup sync queue — max 100 entries, max age 7 hari.
+// Sebelumnya: queue grow forever kalau upload terus gagal → IndexedDB quota penuh.
+export async function cleanupSyncQueue() {
+  try {
+    const queue = await dbGetSyncQueue();
+    if (queue.length === 0) return;
+    const MAX_ENTRIES = 100;
+    const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000; // 7 hari
+    const now = Date.now();
+    const toDelete = [];
+    // Hapus entry >7 hari
+    for (const entry of queue) {
+      const entryTime = new Date(entry.created_at || entry.id || 0).getTime();
+      if (now - entryTime > MAX_AGE_MS) {
+        toDelete.push(entry.id);
+      }
+    }
+    // Kalau masih >100 entry, hapus yang tertua
+    if (queue.length - toDelete.length > MAX_ENTRIES) {
+      const sorted = queue
+        .filter(e => !toDelete.includes(e.id))
+        .sort((a, b) => new Date(a.created_at || a.id || 0) - new Date(b.created_at || b.id || 0));
+      const excess = sorted.slice(0, sorted.length - MAX_ENTRIES);
+      for (const e of excess) toDelete.push(e.id);
+    }
+    for (const id of toDelete) {
+      try { await dbDeleteSyncQueueItem(id); } catch (e) { /* ignore */ }
+    }
+    if (toDelete.length > 0) {
+      console.warn('[RecallFox] Sync queue cleanup: removed', toDelete.length, 'old entries');
+    }
+  } catch (e) {
+    console.warn('[RecallFox] Sync queue cleanup failed:', e.message);
+  }
+}
+
+async function generateThumbnail(dataUrl, maxSize = 200) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const scale = Math.min(maxSize / img.width, maxSize / img.height, 1);
+      canvas.width = img.width * scale;
+      canvas.height = img.height * scale;
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/png'));
+    };
+    img.onerror = () => resolve('');
+    img.src = dataUrl;
+  });
+}
+
+// ===== Upload screenshot blob ke Supabase Storage =====
+// v1.5.3: Selalu return path (predictable URL pattern) bahkan kalau upload gagal.
+// Ini supaya createScreenshotItem bisa simpan gdrive_file_id berdasarkan path,
+// dan addon (v3.13.4) bisa reconstruct URL dari pattern user-<uid>/<id>.png
+// kalau file berhasil di-upload later via retry queue.
+//
+// v1.6.2: AUTO-COMPRESS sebelum upload — root cause "capture gagal sync":
+//   Annotate editor output PNG lossless bisa 5-10MB untuk foto HP 12MP.
+//   Upload 5-10MB dari HP dengan koneksi lambat → timeout 20s → fail.
+//   Solusi: compress ke JPEG max 1920px quality 0.85 → ~200-500KB → upload cepat.
+//   User tidak pernah lihat perbedaan kualitas (layar HP cuma 1080p).
+export async function uploadScreenshotBlob(user, itemId, dataUrl) {
+  if (!user || !itemId || !dataUrl) return { ok: false, error: 'invalid_args' };
+  const path = `user-${user.id}/${itemId}.jpg`;  // v1.6.2: .jpg (bukan .png) — compressed
+  // v1.5.3: Predictable URL — selalu bisa dihitung dari path, bahkan sebelum upload
+  const predictableUrl = `${supabase.supabaseUrl}/storage/v1/object/public/${STORAGE_BUCKET}/${path}`;
+  try {
+    console.log('[RecallFox] uploadScreenshotBlob START:', itemId, 'path:', path, 'dataUrl size:', Math.round(dataUrl.length * 0.75 / 1024) + 'KB');
+
+    // v1.6.2: COMPRESS dataUrl ke JPEG max 1920px quality 0.85 sebelum upload.
+    // Ini menjamin upload cepat (<500KB) bahkan untuk foto HP 12MP.
+    let uploadBlob;
+    let uploadContentType = 'image/jpeg';
+    try {
+      const compressed = await compressForUpload(dataUrl, 1920, 0.85);
+      uploadBlob = compressed.blob;
+      console.log('[RecallFox] compressed:', Math.round(dataUrl.length * 0.75 / 1024) + 'KB →', Math.round(uploadBlob.size / 1024) + 'KB');
+    } catch (e) {
+      console.warn('[RecallFox] compress failed, fallback ke dataUrlToBlob:', e.message);
+      // Fallback: pakai dataUrl asli (mungkin PNG kecil dari screenshot addon)
+      uploadBlob = dataUrlToBlob(dataUrl);
+      if (!uploadBlob) {
+        try {
+          const res = await withTimeout(fetch(dataUrl), 10000, 'dataUrl_fetch');
+          uploadBlob = await res.blob();
+        } catch (e2) {
+          return { ok: false, error: 'blob_conversion_failed: ' + e2.message, path, predictableUrl };
+        }
+      }
+      // Set content type sesuai blob asli
+      uploadContentType = uploadBlob.type || 'image/jpeg';
+    }
+
+    if (!uploadBlob || uploadBlob.size === 0) {
+      return { ok: false, error: 'empty_blob_after_compress', path, predictableUrl };
+    }
+
+    // v1.5.1: wrap storage.upload dengan timeout 20s — kalau Supabase Storage
+    // hang (project paused, network issue, dll), jangan block save selamanya.
+    // v1.6.2: timeout 30s (naik dari 20s) supaya lebih tolerance koneksi lambat.
+    const { error } = await withTimeout(
+      supabase.storage.from(STORAGE_BUCKET).upload(path, uploadBlob, { contentType: uploadContentType, upsert: true }),
+      30000,
+      'storage_upload'
+    );
+    if (error) {
+      console.error('[RecallFox] storage.upload error:', error.message);
+      // v1.5.3: Return path + predictableUrl supaya caller tetap simpan gdrive_file_id
+      // (bisa dipakai addon reconstruct URL kalau retry upload berhasil later)
+      return { ok: false, error: error.message, path, predictableUrl };
+    }
+    console.log('[RecallFox] uploadScreenshotBlob OK:', itemId);
+    return { ok: true, url: predictableUrl, path };
+  } catch (e) {
+    console.error('[RecallFox] uploadScreenshotBlob exception:', e.message);
+    // v1.5.3: Return path + predictableUrl bahkan pada exception
+    return { ok: false, error: e.message, path, predictableUrl };
+  }
+}
+
+// v1.6.2: Compress dataUrl untuk upload — JPEG max 1920px quality 0.85.
+// Kenapa: PNG lossless dari annotate editor bisa 5-10MB → upload timeout di HP.
+// JPEG 1920px 0.85 → ~200-500KB → upload cepat, kualitas tetap bagus untuk layar HP.
+// @returns {Promise<{blob: Blob, width: number, height: number}>}
+async function compressForUpload(dataUrl, maxDim = 1920, quality = 0.85) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const origW = img.naturalWidth;
+        const origH = img.naturalHeight;
+        let outW = origW;
+        let outH = origH;
+        // Scale down kalau lebih besar dari maxDim (preserve aspect ratio)
+        if (Math.max(origW, origH) > maxDim) {
+          const scale = maxDim / Math.max(origW, origH);
+          outW = Math.round(origW * scale);
+          outH = Math.round(origH * scale);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = outW;
+        canvas.height = outH;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        // White background (JPEG no transparency)
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, outW, outH);
+        ctx.drawImage(img, 0, 0, outW, outH);
+        canvas.toBlob((blob) => {
+          if (!blob) reject(new Error('toBlob returned null'));
+          else resolve({ blob, width: outW, height: outH });
+        }, 'image/jpeg', quality);
+      } catch (e) {
+        reject(e);
+      }
+    };
+    img.onerror = () => reject(new Error('image load failed in compressForUpload'));
+    img.src = dataUrl;
+  });
+}
+
+export async function deleteScreenshotBlob(user, itemId) {
+  if (!user || !itemId) return { ok: false, error: 'invalid_args' };
+  // v1.6.2: Hapus kedua kemungkinan path (.jpg v1.6.2+ dan .png versi lama)
+  // supaya cleanup lengkap tidak ada orphan file di Storage.
+  const paths = [
+    `user-${user.id}/${itemId}.jpg`,  // v1.6.2+
+    `user-${user.id}/${itemId}.png`   // versi lama
+  ];
+  try {
+    const { error } = await supabase.storage.from(STORAGE_BUCKET).remove(paths);
+    if (error) {
+      console.warn('[RecallFox] deleteScreenshotBlob error (non-fatal):', error.message);
+      // Return ok=true anyway — vault_items row delete lebih penting dari Storage cleanup
+    }
+    return { ok: true };
+  } catch (e) {
+    console.warn('[RecallFox] deleteScreenshotBlob exception (non-fatal):', e.message);
+    return { ok: true };
+  }
+}
+
+// ===== Screenshot blob lazy download =====
+export async function downloadScreenshotBlob(item) {
+  if (!item?.id) return { ok: false, error: 'no_id' };
+  const cloudUrl = item.gdrive_file_url || item.gdriveFileUrl;
+  if (!cloudUrl) return { ok: false, error: 'no_cloud_url' };
+  try {
+    // cache: 'no-store' supaya Service Worker (kalau ada) tidak intercept
+    const res = await fetch(cloudUrl, { cache: 'no-store' });
+    if (!res.ok) {
+      // v1.6.1: Better error message untuk 404 (orphan URL).
+      // Supabase Storage return 400 untuk 404 object (quirk). Map ke pesan yang
+      // jelas: file tidak ada di cloud, mungkin upload gagal atau sedang retry.
+      if (res.status === 400 || res.status === 404) {
+        console.warn('[RecallFox] downloadScreenshotBlob: file not found in Storage (orphan URL):', item.id, cloudUrl);
+        return { ok: false, error: 'file_not_found_in_cloud', httpStatus: res.status };
+      }
+      return { ok: false, error: 'http_' + res.status, httpStatus: res.status };
+    }
+    const blob = await res.blob();
+    if (!blob || blob.size === 0) return { ok: false, error: 'empty_blob' };
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('filereader_failed'));
+      reader.readAsDataURL(blob);
+    });
+    await dbPutScreenshotBlob(item.id, dataUrl);
+    return { ok: true, dataUrl };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+export async function getOrDownloadScreenshotBlob(item) {
+  if (!item?.id) return { ok: false, dataUrl: null, error: 'no_id' };
+  // Step 1: cek local cache
+  let dataUrl = await dbGetScreenshotBlob(item.id);
+  if (dataUrl) return { ok: true, dataUrl, source: 'local' };
+  // Step 2: download dari cloud
+  const dlRes = await downloadScreenshotBlob(item);
+  if (dlRes.ok) return { ok: true, dataUrl: dlRes.dataUrl, source: 'cloud' };
+  return { ok: false, dataUrl: null, error: dlRes.error };
+}
+
+// ===== Vault items CRUD =====
+// v1.2.0: Return ok:false kalau upload Storage ATAU upsert vault_items gagal.
+//         UI bisa tampilkan pesan error yang akurat ke user.
+//         Sebelumnya selalu ok:true meski gagal → user pikir "tersimpan".
+// v1.5.1: IndexedDB write DILAKUKAN PERTAMA (sebelum upload Storage & upsert
+//         vault_items). Ini menjamin data user TIDAK PERNAH hilang meski cloud
+//         gagal/hang. Sebelumnya IndexedDB write ada SETELAH upsert — kalau upsert
+//         hang (Supabase paused/network issue), IndexedDB tidak pernah ditulis →
+//         user lihat "tidak ada jejak save apapun di media".
+//         Semua await supabase.* dibungkus withTimeout 20s supaya tidak hang selamanya.
+export async function createScreenshotItem(user, payload) {
+  // payload: { dataUrl, width, height, mode, title, annotationNote, sourceUrl, sourceTitle }
+  const itemId = genId('sh');
+  const now = new Date().toISOString();
+  const dataUrlSizeKB = payload.dataUrl ? Math.round(payload.dataUrl.length * 0.75 / 1024) : 0;
+  console.log('[RecallFox] createScreenshotItem START:', itemId, 'user:', user?.id, 'mode:', payload?.mode, 'dataUrl size:', dataUrlSizeKB + 'KB');
+  const thumbnailDataUrl = await generateThumbnail(payload.dataUrl, 200);
+
+  // Step 1: Upload blob ke Storage DULU
+  const upRes = await uploadScreenshotBlob(user, itemId, payload.dataUrl);
+  let storageOk = upRes.ok;
+  let storageError = upRes.error || null;
+  if (!storageOk) {
+    console.warn('[RecallFox] Storage upload FAILED, enqueuing for retry. Error:', storageError, '| dataUrl size:', dataUrlSizeKB + 'KB');
+    // Enqueue untuk retry di background
+    await dbEnqueueSync({
+      op: 'upload_screenshot',
+      user_id: user.id,
+      item_id: itemId,
+      data_url: payload.dataUrl,
+      payload
+    });
+  } else {
+    console.log('[RecallFox] Storage upload OK, URL:', upRes.url);
+  }
+
+  const row = {
+    id: itemId,
+    user_id: user.id,
+    type: 'screenshot',
+    title: payload.title || `HP Capture ${new Date().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}`,
+    body: '',
+    tags: [],
+    category: null,
+    source: {
+      url: payload.sourceUrl || null,
+      title: payload.sourceTitle || 'HP Capture',
+      capturedAt: now,
+      device: 'pwa-mobile',
+      annotationNote: payload.annotationNote || '',
+      // v1.8.0: GPS location dari capture (camera live GPS atau gallery EXIF).
+      // Schema: { lat, lng, accuracy, address, capturedAt } — kompatibel dengan addon.
+      location: payload.location || null
+    },
+    screenshot_mode: payload.mode || 'selection',
+    screenshot_width: payload.width || 0,
+    screenshot_height: payload.height || 0,
+    screenshot_format: 'png',
+    screenshot_bytes: payload.dataUrl?.length || 0,
+    thumbnail_data_url: thumbnailDataUrl,
+    // v1.6.1 FIX BUG v1.5.3: Jangan simpan predictableUrl kalau upload gagal.
+    // Bug v1.5.3: simpan predictableUrl walau upload gagal → URL orphan → fetch 404
+    // → "Gagal memuat gambar: http_400". User frustrasi karena pikir gambar ada.
+    // v1.6.1: Hanya simpan gdrive_file_url kalau upload BENAR-BENAR berhasil.
+    // Kalau upload gagal, simpan null + enqueue retry. Sync queue akan update
+    // gdrive_file_url kalau retry upload berhasil.
+    // gdrive_file_id tetap simpan path (untuk retry upload reference).
+    gdrive_file_id: upRes.path || null,
+    gdrive_file_url: upRes.ok ? (upRes.url || upRes.predictableUrl) : null,
+    toppings: [],
+    variables: [],
+    favorite: false,
+    archived: false,
+    use_count: 0,
+    last_used_at: null,
+    created_at: now,
+    updated_at: now,
+    deleted_at: null,
+    device_id: getDeviceId()
+  };
+
+  // v1.5.1: Step 2 — IndexedDB write PERTAMA (sebelum cloud upsert).
+  // Ini menjamin data user tidak hilang meski cloud gagal/hang.
+  // Kalau IndexedDB write gagal (quota, db corruption), log error tapi lanjut
+  // ke cloud upsert — cloud mungkin masih bisa simpan.
+  try {
+    await dbPutVaultItem(row);
+    await dbPutScreenshotBlob(itemId, payload.dataUrl);
+    console.log('[RecallFox] IndexedDB write OK (pre-cloud):', itemId);
+  } catch (e) {
+    console.error('[RecallFox] IndexedDB write FAILED (pre-cloud):', e.message);
+  }
+
+  // Step 3: Insert ke Supabase vault_items (dengan timeout 20s)
+  let upsertOk = false;
+  let upsertError = null;
+  try {
+    const { data: upsertData, error } = await withTimeout(
+      supabase.from(VAULT_TABLE).upsert(row).select(),
+      20000,
+      'vault_upsert'
+    );
+    console.log('[RecallFox] upsert result:', { error: error?.message, hasData: !!upsertData });
+    if (error) {
+      upsertError = error.message;
+      console.error('[RecallFox] upsert FAILED — enqueuing for retry:', upsertError);
+      await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
+    } else {
+      upsertOk = true;
+      // v1.2.0: Juga insert ke tabel screenshots supaya konsisten dengan addon
+      // (addon selalu insert ke screenshots table dengan storage_path/url)
+      if (upRes.ok) {
+        try {
+          await withTimeout(
+            supabase.from(SCREENSHOTS_TABLE).upsert({
+              id: itemId,
+              user_id: user.id,
+              vault_item_id: itemId,
+              storage_path: upRes.path,
+              storage_url: upRes.url,
+              file_size: payload.dataUrl?.length || 0,
+              width: payload.width || 0,
+              height: payload.height || 0,
+              format: 'png',
+              annotation_note: payload.annotationNote || '',
+              captured_at: now,
+              source_url: payload.sourceUrl || null,
+              source_title: payload.sourceTitle || null
+            }),
+            15000,
+            'screenshots_upsert'
+          );
+        } catch (e) {
+          // Tidak fatal — vault_items sudah berhasil
+          console.warn('[RecallFox] screenshots table insert failed (non-fatal):', e.message);
+        }
+      }
+    }
+  } catch (e) {
+    upsertError = e.message;
+    console.error('[RecallFox] upsert exception:', upsertError);
+    await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
+  }
+
+  // Step 4: Return status akurat
+  // v1.5.1: Data SUDAH di IndexedDB (step 2) — return ok:true bahkan kalau
+  // cloud gagal, supaya UI tampilkan item di media tab + toast akurat.
+  // v1.6.2: Trigger immediate retry sync queue kalau ada failure — tidak tunggu
+  //   interval 30s. Kadang first attempt gagal karena network blip, retry langsung sukses.
+  if (storageOk && upsertOk) {
+    console.log('[RecallFox] createScreenshotItem OK (cloud synced):', itemId);
+    return { ok: true, item: row, synced: true };
+  }
+  if (upsertOk && !storageOk) {
+    // vault_items saved, but blob upload failed — retry in background
+    console.log('[RecallFox] createScreenshotItem PARTIAL (vault saved, blob pending):', itemId, '| storageError:', storageError);
+    // v1.6.2: Trigger immediate retry (async, non-blocking)
+    setTimeout(() => processSyncQueue(user).catch(e => console.warn('[RecallFox] immediate retry failed:', e.message)), 2000);
+    return {
+      ok: true,
+      item: row,
+      synced: false,
+      partial: true,
+      warning: 'Tersimpan — gambar sedang diupload ulang otomatis',
+      storageError
+    };
+  }
+  // Both failed or upsert failed — data only in local IndexedDB
+  // v1.5.1: Tetap return ok:true + localOnly supaya UI tetap tampilkan item
+  // (item sudah ada di IndexedDB dari step 2). Toast bilang "lokal".
+  console.log('[RecallFox] createScreenshotItem LOCAL-ONLY:', itemId, 'errors:', { upsertError, storageError });
+  // v1.6.2: Trigger immediate retry (async, non-blocking)
+  setTimeout(() => processSyncQueue(user).catch(e => console.warn('[RecallFox] immediate retry failed:', e.message)), 2000);
+  return {
+    ok: true,                  // v1.5.1: changed from false → true (data IS saved locally)
+    item: row,
+    synced: false,
+    localOnly: true,
+    error: upsertError || storageError || 'sync_failed',
+    storageError,
+    upsertError
+  };
+}
+
+// v1.13.0: createFileItem — Upload file teks ke Supabase Storage + insert vault_items
+// Mirror addon _uploadFileDocument + addItem flow.
+// payload: { title, body, tags, source: { kind, mime, fileName, size, uploadedFrom, capturedAt } }
+export async function createFileItem(user, payload) {
+  const itemId = genId('f');
+  const now = new Date().toISOString();
+  console.log('[RecallFox] createFileItem START:', itemId, 'user:', user?.id, 'fileName:', payload.source?.fileName);
+
+  const kind = payload.source?.kind || 'txt';
+  const mime = payload.source?.mime || 'text/plain';
+  const extMap = { md: 'md', txt: 'txt', json: 'json', html: 'html', csv: 'csv', yaml: 'yaml' };
+  const ext = extMap[kind] || 'txt';
+  const path = `user-${user.id}/${itemId}.${ext}`;
+  const blob = new Blob([payload.body], { type: mime });
+
+  // Step 1: Upload blob to Storage bucket 'documents'
+  let storageUrl = null;
+  let storageOk = false;
+  try {
+    const { error: upErr } = await supabase.storage.from(DOCUMENTS_BUCKET).upload(path, blob, { contentType: mime, upsert: true });
+    if (upErr) {
+      console.warn('[RecallFox] File upload to Storage FAILED:', upErr.message);
+    } else {
+      storageUrl = `${supabase.supabaseUrl}/storage/v1/object/public/${DOCUMENTS_BUCKET}/${path}`;
+      storageOk = true;
+      console.log('[RecallFox] File upload OK, URL:', storageUrl);
+    }
+  } catch (e) {
+    console.warn('[RecallFox] File upload exception:', e.message);
+  }
+
+  // Step 2: Insert vault_items row
+  const row = {
+    id: itemId,
+    user_id: user.id,
+    type: 'file',
+    title: payload.title || payload.source?.fileName || 'File Upload',
+    body: payload.body || '',
+    tags: payload.tags || ['file', kind],
+    category: null,
+    source: payload.source || null,
+    gdrive_file_id: storageOk ? path : null,
+    gdrive_file_url: storageOk ? storageUrl : null,
+    favorite: false,
+    archived: false,
+    use_count: 0,
+    created_at: now,
+    updated_at: now
+  };
+
+  try {
+    const { error: insertErr } = await supabase.from(VAULT_TABLE).upsert(row);
+    if (insertErr) {
+      console.error('[RecallFox] createFileItem insert error:', insertErr.message);
+      return { ok: false, error: insertErr.message };
+    }
+  } catch (e) {
+    console.error('[RecallFox] createFileItem insert exception:', e.message);
+    return { ok: false, error: e.message };
+  }
+
+  // Step 3: Cache to IndexedDB
+  try {
+    await dbPutVaultItem({ ...row, gdriveFileId: row.gdrive_file_id, gdriveFileUrl: row.gdrive_file_url });
+  } catch (e) {
+    console.warn('[RecallFox] createFileItem: IndexedDB cache failed (not fatal):', e.message);
+  }
+
+  console.log('[RecallFox] createFileItem OK:', itemId, 'storageOk:', storageOk);
+  return { ok: true, itemId, storageOk, storageUrl };
+}
+
+export async function deleteVaultItem(user, itemId) {
+  if (!user || !itemId) return { ok: false, error: 'invalid_args' };
+
+  // v1.11.0: Tambah ke delete registry DULU sebelum hard-delete cloud.
+  // Supaya: (a) pull berikutnya tidak re-add item ini kalau device lain push ulang,
+  //         (b) processSyncQueue skip upsert_vault untuk item ini.
+  // Root cause bug "item muncul kembali setelah dihapus": device lain masih punya
+  // item di lokal + push ke cloud → cloud punya item lagi → PWA pull → re-add.
+  // Delete registry lock: item yang ada di registry TIDAK akan di-re-add oleh pull.
+  addToDeleteRegistry(itemId, new Date().toISOString());
+  console.log('[RecallFox] deleteVaultItem: added to registry', itemId);
+
+  // Hard delete dari Supabase
+  const { error } = await supabase.from(VAULT_TABLE).delete().eq('id', itemId);
+  if (error) {
+    console.warn('[RecallFox] deleteVaultItem: cloud delete failed, enqueuing:', error.message);
+    await dbEnqueueSync({ op: 'delete_vault', user_id: user.id, item_id: itemId });
+  } else {
+    console.log('[RecallFox] deleteVaultItem: cloud delete OK', itemId);
+  }
+  // Hapus screenshot blob dari Storage
+  await deleteScreenshotBlob(user, itemId);
+  // v1.2.0: Hapus dari tabel screenshots juga (konsistensi dengan addon)
+  try {
+    await supabase.from(SCREENSHOTS_TABLE).delete().eq('id', itemId);
+  } catch (e) { /* non-fatal */ }
+  // Hapus dari IndexedDB
+  await dbDeleteVaultItem(itemId);
+  await dbDeleteScreenshotBlob(itemId);
+  return { ok: true };
+}
+
+// ===== v1.6.4: Update vault item (title, annotationNote, etc.) =====
+export async function updateVaultItem(user, itemId, patch) {
+  if (!user || !itemId) return { ok: false, error: 'invalid_args' };
+  const now = new Date().toISOString();
+  const updates = { ...patch, updated_at: now, device_id: getDeviceId() };
+
+  // Update di Supabase
+  try {
+    const { error } = await withTimeout(
+      supabase.from(VAULT_TABLE).update(updates).eq('id', itemId),
+      15000, 'vault_update'
+    );
+    if (error) {
+      await dbEnqueueSync({ op: 'update_vault', user_id: user.id, item_id: itemId, patch: updates });
+    }
+  } catch (e) {
+    await dbEnqueueSync({ op: 'update_vault', user_id: user.id, item_id: itemId, patch: updates });
+  }
+
+  // Update di IndexedDB
+  const local = await dbGetVaultItem(itemId);
+  if (local) {
+    await dbPutVaultItem({ ...local, ...updates });
+  }
+  return { ok: true };
+}
+
+// ===== v1.3.0: Document item (CamScanner-like) =====
+// Sama seperti createScreenshotItem, tapi type='document' dan source.pages berisi metadata halaman.
+// Phase 2: single page only. Phase 5 (later): multi-page batch.
+export async function createDocumentItem(user, payload) {
+  // payload: { dataUrl, width, height, filter, title, note }
+  const itemId = genId('doc');
+  const now = new Date().toISOString();
+  const thumbnailDataUrl = await generateThumbnail(payload.dataUrl, 200);
+
+  // Upload blob ke Storage (pakai path terpisah dari screenshot supaya mudah filter)
+  const path = `user-${user.id}/${itemId}.jpg`;
+  let storageOk = false;
+  let storageError = null;
+  let storageUrl = null;
+  try {
+    // v1.5.1: wrap fetch dengan timeout
+    let blob = dataUrlToBlob(payload.dataUrl);
+    if (!blob) {
+      const res = await withTimeout(fetch(payload.dataUrl), 10000, 'doc_dataUrl_fetch');
+      blob = await res.blob();
+    }
+    let uploadBlob = blob;
+    if (blob.type !== 'image/jpeg') {
+      // Convert ke JPEG
+      const img = await createImageBitmap(blob);
+      const canvas = document.createElement('canvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0);
+      uploadBlob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
+    }
+    // v1.5.1: wrap storage.upload dengan timeout 20s
+    const { error: upErr } = await withTimeout(
+      supabase.storage.from(STORAGE_BUCKET).upload(path, uploadBlob, { contentType: 'image/jpeg', upsert: true }),
+      20000,
+      'doc_storage_upload'
+    );
+    if (upErr) {
+      storageError = upErr.message;
+    } else {
+      storageOk = true;
+      storageUrl = `${supabase.supabaseUrl}/storage/v1/object/public/${STORAGE_BUCKET}/${path}`;
+    }
+  } catch (e) {
+    storageError = e.message;
+  }
+  if (!storageOk) {
+    await dbEnqueueSync({
+      op: 'upload_document',
+      user_id: user.id,
+      item_id: itemId,
+      data_url: payload.dataUrl,
+      payload
+    });
+    console.warn('[RecallFox] Document storage upload failed, enqueued for retry:', storageError);
+  }
+
+  const row = {
+    id: itemId,
+    user_id: user.id,
+    type: 'document',                     // ← TYPE BARU v1.3.0
+    title: payload.title || `Dokumen ${new Date().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}`,
+    body: '',
+    tags: [],
+    category: null,
+    source: {
+      capturedAt: now,
+      device: 'pwa-mobile',
+      annotationNote: payload.note || '',
+      // v1.8.0: GPS location dari capture (kompatibel dengan addon).
+      location: payload.location || null,
+      pages: [                             // ← ARRAY HALAMAN (Phase 2: 1 halaman)
+        {
+          url: storageUrl,
+          width: payload.width || 0,
+          height: payload.height || 0,
+          filter: payload.filter || 'original',
+          size_bytes: payload.dataUrl?.length || 0
+        }
+      ]
+    },
+    screenshot_mode: 'document',
+    screenshot_width: payload.width || 0,
+    screenshot_height: payload.height || 0,
+    screenshot_format: 'jpeg',
+    screenshot_bytes: payload.dataUrl?.length || 0,
+    thumbnail_data_url: thumbnailDataUrl,
+    gdrive_file_id: storageOk ? path : null,
+    gdrive_file_url: storageOk ? storageUrl : null,
+    toppings: [],
+    variables: [],
+    favorite: false,
+    archived: false,
+    use_count: 0,
+    last_used_at: null,
+    created_at: now,
+    updated_at: now,
+    deleted_at: null,
+    device_id: getDeviceId()
+  };
+
+  // v1.5.1: IndexedDB write PERTAMA (sebelum cloud upsert) supaya data user
+  // tidak hilang meski cloud gagal/hang.
+  try {
+    await dbPutVaultItem(row);
+    await dbPutScreenshotBlob(itemId, payload.dataUrl);
+    console.log('[RecallFox] Document (single-page) IndexedDB write OK (pre-cloud):', itemId);
+  } catch (e) {
+    console.error('[RecallFox] Document (single-page) IndexedDB write FAILED (pre-cloud):', e.message);
+  }
+
+  // Insert ke vault_items (dengan timeout 20s)
+  let upsertOk = false;
+  let upsertError = null;
+  try {
+    const { error } = await withTimeout(
+      supabase.from(VAULT_TABLE).upsert(row),
+      20000,
+      'doc_single_vault_upsert'
+    );
+    if (error) {
+      upsertError = error.message;
+      await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
+    } else {
+      upsertOk = true;
+    }
+  } catch (e) {
+    upsertError = e.message;
+    await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
+  }
+
+  // v1.5.1: Return ok:true bahkan kalau upsert gagal — data sudah di IndexedDB.
+  if (storageOk && upsertOk) {
+    return { ok: true, item: row, synced: true };
+  }
+  if (upsertOk && !storageOk) {
+    return { ok: true, item: row, synced: false, partial: true, warning: 'Dokumen tersimpan, gambar sedang diupload ulang', storageError };
+  }
+  return {
+    ok: true,                    // v1.5.1: changed from false → true (data IS saved locally)
+    item: row,
+    synced: false,
+    localOnly: true,
+    error: upsertError || storageError || 'sync_failed',
+    storageError,
+    upsertError
+  };
+}
+
+// ===== v1.4.0: Document multi-page (Fase 5 — batch) =====
+// Upload semua halaman ke Storage, simpan metadata di source.pages
+// v1.5.1: IndexedDB write DILAKUKAN PERTAMA (sebelum upload & upsert) supaya
+//         data user tidak hilang kalau cloud hang/gagal. Sama seperti
+//         createScreenshotItem. Semua fetch + supabase calls dibungkus timeout.
+export async function createDocumentItemMultiPage(user, payload) {
+  // payload: { pages: [{dataUrl, filter, width, height}], title, note }
+  const pages = payload.pages || [];
+  if (pages.length === 0) return { ok: false, error: 'no_pages' };
+
+  const itemId = genId('doc');
+  const now = new Date().toISOString();
+  console.log('[RecallFox] createDocumentItemMultiPage START:', itemId, 'user:', user?.id, 'pages:', pages.length);
+
+  // Thumbnail dari halaman pertama
+  const thumbnailDataUrl = await generateThumbnail(pages[0].dataUrl, 200);
+
+  // Upload semua halaman ke Storage
+  const pageMetas = [];
+  let totalBytes = 0;
+  let allUploadsOk = true;
+  for (let i = 0; i < pages.length; i++) {
+    const page = pages[i];
+    const path = `user-${user.id}/${itemId}_p${i + 1}.jpg`;
+    let pageUrl = null;
+    try {
+      // v1.5.1: wrap fetch(dataUrl) dengan timeout — dataUrl besar bisa stall
+      const blob = await (await withTimeout(fetch(page.dataUrl), 10000, 'page_fetch_' + (i + 1))).blob();
+      let uploadBlob = blob;
+      if (blob.type !== 'image/jpeg') {
+        const img = await createImageBitmap(blob);
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0);
+        uploadBlob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
+      }
+      // v1.5.1: wrap storage.upload dengan timeout 20s
+      const { error: upErr } = await withTimeout(
+        supabase.storage.from(STORAGE_BUCKET).upload(path, uploadBlob, { contentType: 'image/jpeg', upsert: true }),
+        20000,
+        'page_upload_' + (i + 1)
+      );
+      if (!upErr) {
+        pageUrl = `${supabase.supabaseUrl}/storage/v1/object/public/${STORAGE_BUCKET}/${path}`;
+        console.log('[RecallFox] Page ' + (i + 1) + ' uploaded OK');
+      } else {
+        console.warn(`[RecallFox] Page ${i + 1} upload failed:`, upErr.message);
+        allUploadsOk = false;
+      }
+    } catch (e) {
+      console.warn(`[RecallFox] Page ${i + 1} upload exception:`, e.message);
+      allUploadsOk = false;
+    }
+    const sizeBytes = Math.round(page.dataUrl.length * 0.75);
+    totalBytes += sizeBytes;
+    pageMetas.push({
+      url: pageUrl,
+      width: page.width || 0,
+      height: page.height || 0,
+      filter: page.filter || 'original',
+      size_bytes: sizeBytes
+    });
+  }
+
+  const row = {
+    id: itemId,
+    user_id: user.id,
+    type: 'document',
+    title: payload.title || `Dokumen ${new Date().toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' })}`,
+    body: '',
+    tags: [],
+    category: null,
+    source: {
+      capturedAt: now,
+      device: 'pwa-mobile',
+      annotationNote: payload.note || '',
+      pages: pageMetas
+    },
+    screenshot_mode: 'document',
+    screenshot_width: pageMetas[0]?.width || 0,
+    screenshot_height: pageMetas[0]?.height || 0,
+    screenshot_format: 'jpeg',
+    screenshot_bytes: totalBytes,
+    thumbnail_data_url: thumbnailDataUrl,
+    gdrive_file_id: pageMetas[0]?.url ? `user-${user.id}/${itemId}_p1.jpg` : null,
+    gdrive_file_url: pageMetas[0]?.url || null,
+    toppings: [],
+    variables: [],
+    favorite: false,
+    archived: false,
+    use_count: 0,
+    last_used_at: null,
+    created_at: now,
+    updated_at: now,
+    deleted_at: null,
+    device_id: getDeviceId()
+  };
+
+  // v1.5.1: IndexedDB write PERTAMA (sebelum cloud upsert) supaya data user
+  // tidak hilang meski cloud gagal/hang.
+  try {
+    await dbPutVaultItem(row);
+    await dbPutScreenshotBlob(itemId, pages[0].dataUrl);
+    console.log('[RecallFox] Document IndexedDB write OK (pre-cloud):', itemId);
+  } catch (e) {
+    console.error('[RecallFox] Document IndexedDB write FAILED (pre-cloud):', e.message);
+  }
+
+  // Insert ke vault_items (dengan timeout 20s)
+  let upsertOk = false;
+  let upsertError = null;
+  try {
+    const { data: upsertData, error } = await withTimeout(
+      supabase.from(VAULT_TABLE).upsert(row).select(),
+      20000,
+      'doc_vault_upsert'
+    );
+    console.log('[RecallFox] document upsert result:', { error: error?.message, hasData: !!upsertData });
+    if (error) {
+      upsertError = error.message;
+      console.error('[RecallFox] document upsert FAILED — enqueuing for retry:', upsertError);
+      await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
+    } else {
+      upsertOk = true;
+    }
+  } catch (e) {
+    upsertError = e.message;
+    console.error('[RecallFox] document upsert exception:', upsertError);
+    await dbEnqueueSync({ op: 'upsert_vault', user_id: user.id, row });
+  }
+
+  // v1.5.1: Return ok:true bahkan kalau upsert gagal — data sudah di IndexedDB.
+  // UI tetap tampilkan item di media tab + toast akurat.
+  if (upsertOk && allUploadsOk) {
+    console.log('[RecallFox] createDocumentItemMultiPage OK (cloud synced):', itemId);
+    return {
+      ok: true,
+      item: row,
+      synced: true,
+      pageCount: pages.length,
+      upsertError: null
+    };
+  }
+  if (upsertOk && !allUploadsOk) {
+    console.log('[RecallFox] createDocumentItemMultiPage PARTIAL:', itemId);
+    return {
+      ok: true,
+      item: row,
+      synced: true,
+      partial: true,
+      pageCount: pages.length,
+      warning: 'Dokumen tersimpan, beberapa halaman sedang diupload ulang',
+      upsertError: null
+    };
+  }
+  // upsert failed — data only in IndexedDB
+  console.log('[RecallFox] createDocumentItemMultiPage LOCAL-ONLY:', itemId, 'upsertError:', upsertError);
+  return {
+    ok: true,                  // v1.5.1: changed from upsertOk → true (data IS saved locally)
+    item: row,
+    synced: false,
+    localOnly: true,
+    pageCount: pages.length,
+    error: upsertError || 'sync_failed',
+    upsertError
+  };
+}
+
+// ===== Notes CRUD =====
+// v1.5.2 (P1/P2/P3 fixes): IndexedDB write DULU, baru cloud upsert.
+// Sebelumnya cloud upsert DULU → kalau hang, IndexedDB tidak pernah ditulis
+// → user lihat "catatan tidak tersinkron / hilang". Mirror v1.5.1 pattern
+// yang sudah fix untuk vault items (createScreenshotItem, createDocumentItem).
+export async function createNote(user, payload) {
+  const noteId = genId('n');
+  const now = new Date().toISOString();
+  const row = {
+    id: noteId,
+    user_id: user.id,
+    title: payload.title || null,
+    body: payload.body || '',
+    color: payload.color || 'default',
+    group: payload.group || null,
+    pinned: !!payload.pinned,
+    archived: !!payload.archived,
+    created_at: now,
+    updated_at: now,
+    deleted_at: null,
+    device_id: getDeviceId()
+  };
+  // v1.5.2 (P1 fix): IndexedDB write PERTAMA — catatan pasti tersave lokal
+  // bahkan kalau cloud hang. UI baca dari IndexedDB.
+  await dbPutNote(row);
+  try {
+    const { error } = await withTimeout(
+      supabase.from(NOTES_TABLE).upsert(row),
+      20000,
+      'note_upsert'
+    );
+    if (error) {
+      await dbEnqueueSync({ op: 'upsert_note', user_id: user.id, row });
+      return { ok: true, note: row, localOnly: true, error: error.message };
+    }
+  } catch (e) {
+    // Timeout / network error — catatan sudah ada di IndexedDB, queue untuk retry
+    await dbEnqueueSync({ op: 'upsert_note', user_id: user.id, row });
+    return { ok: true, note: row, localOnly: true, error: e.message };
+  }
+  return { ok: true, note: row };
+}
+
+// v1.8.1: Voice notes DIHAPUS — user bilang "batasan mb, tidak terpakai".
+export async function updateNote(user, noteId, patch) {
+  const now = new Date().toISOString();
+  const updates = { ...patch, updated_at: now, device_id: getDeviceId() };
+  // v1.5.2 (P2 fix): Ambil note lokal dulu (jangan skip kalau tidak ada).
+  // Sebelumnya: kalau note tidak ada di local cache (race condition dengan
+  // pullFromCloud), update lokal di-skip → edit tidak sinkron antar device.
+  // Sekarang: selalu upsert ke IndexedDB dengan merge.
+  const localNotes = await dbGetAllNotes();
+  const existing = localNotes.find(n => n.id === noteId) || {
+    id: noteId,
+    user_id: user.id,
+    created_at: now,
+    deleted_at: null
+  };
+  const merged = { ...existing, ...updates };
+  await dbPutNote(merged);
+  try {
+    const { error } = await withTimeout(
+      supabase.from(NOTES_TABLE).update(updates).eq('id', noteId),
+      20000,
+      'note_update'
+    );
+    if (error) {
+      await dbEnqueueSync({ op: 'update_note', user_id: user.id, note_id: noteId, patch: updates });
+      return { ok: true, localOnly: true, error: error.message };
+    }
+  } catch (e) {
+    await dbEnqueueSync({ op: 'update_note', user_id: user.id, note_id: noteId, patch: updates });
+    return { ok: true, localOnly: true, error: e.message };
+  }
+  return { ok: true };
+}
+
+export async function deleteNote(user, noteId) {
+  // v1.5.2 (P3 fix): IndexedDB delete PERTAMA — ghost note hilang dari UI
+  // bahkan kalau cloud delete hang. Sebelumnya cloud delete DULU → kalau hang,
+  // note masih muncul di UI (ghost).
+  // v1.11.0: Tambah ke delete registry DULU — lock supaya tidak re-appear.
+  addNoteToDeleteRegistry(noteId, new Date().toISOString());
+  console.log('[RecallFox] deleteNote: added to registry', noteId);
+  await dbDeleteNote(noteId);
+  try {
+    const { error } = await withTimeout(
+      supabase.from(NOTES_TABLE).delete().eq('id', noteId),
+      20000,
+      'note_delete'
+    );
+    if (error) {
+      await dbEnqueueSync({ op: 'delete_note', user_id: user.id, note_id: noteId });
+      return { ok: true, localOnly: true, error: error.message };
+    }
+  } catch (e) {
+    await dbEnqueueSync({ op: 'delete_note', user_id: user.id, note_id: noteId });
+    return { ok: true, localOnly: true, error: e.message };
+  }
+  return { ok: true };
+}
+
+// ===== Pull (download dari cloud ke IndexedDB) =====
+// v1.2.0:
+//   - Jangan hapus item lokal yang device_id-nya cocok dengan device ini
+//     (item yang baru dibuat di device ini tapi belum sempat sync ke cloud).
+//     Sebelumnya setelah 60s item lokal dihapus → user lihat "tidak terjadi
+//     apa-apa" setelah toast "Tersimpan" muncul.
+//   - Cache blob screenshot ke IndexedDB saat pull (background, non-blocking)
+//     supaya getOrDownloadScreenshotBlob bisa ambil dari local saat openItemDetail.
+export async function pullFromCloud(user) {
+  if (!user) return { ok: false, error: 'no_user' };
+  const currentDeviceId = getDeviceId();
+
+  // v1.11.0: Cleanup delete registry sebelum pull (hapus entry >30 hari).
+  cleanupDeleteRegistry();
+  const deletedItemIds = new Set(getDeletedItemIds());
+  const deletedNoteIds = new Set(getDeletedNoteIds());
+  console.log('[RecallFox] pullFromCloud: delete registry has', deletedItemIds.size, 'items,', deletedNoteIds.size, 'notes');
+
+  // Pull vault_items (HANYA yang deleted_at IS NULL)
+  const { data: items, error: e1 } = await supabase
+    .from(VAULT_TABLE)
+    .select('*')
+    .eq('user_id', user.id)
+    .is('deleted_at', null)
+    .order('updated_at', { ascending: false });
+  if (!e1 && items) {
+    const cloudIds = new Set(items.map(r => r.id));
+    const localItems = await dbGetAllVaultItems();
+    const now = Date.now();
+    // Hapus lokal yang tidak ada di cloud
+    for (const li of localItems) {
+      if (!cloudIds.has(li.id) && li.user_id === user.id) {
+        // v1.8.4: HAPUS isOwnDevice check — itu bikin deletion tidak propagate cross-device.
+        //   Sekarang: hanya 60s grace period (sama seperti addon pullFromSupabaseV33).
+        // v1.9.4 FIX: Jangan hapus isGroup items (folders) yang belum sync ke cloud.
+        //   Folder items dibuat di addon tapi mungkin belum ter-push ke Supabase.
+        //   Jika PWA pull menghapusnya dari IndexedDB, folder hilang dari PWA.
+        //   User report: "ada prompt dan folder yang hilang setelah pwa diperbaiki"
+        if (li.source?.isGroup) {
+          continue; // Skip deletion — folder mungkin belum sync
+        }
+        // v1.11.0: Jangan hapus item yang baru saja di-delete di device ini
+        // (sudah ada di delete registry + masih dalam grace period 5 menit).
+        // Item ini sengaja dihapus, bukan "hilang dari cloud karena belum sync".
+        if (deletedItemIds.has(li.id)) {
+          // Pastikan dihapus dari IndexedDB (kalau masih ada)
+          await dbDeleteVaultItem(li.id);
+          await dbDeleteScreenshotBlob(li.id);
+          continue;
+        }
+        const createdAt = new Date(li.created_at || 0).getTime();
+        if (now - createdAt > 60000) {
+          await dbDeleteVaultItem(li.id);
+          await dbDeleteScreenshotBlob(li.id);
+        }
+      }
+    }
+    // Merge cloud → local (last-write-wins by updated_at)
+    for (const row of items) {
+      // v1.11.0: SKIP item yang ada di delete registry — jangan re-add.
+      // Root cause bug "item muncul kembali": device lain push ulang item yang
+      // sudah dihapus di device ini. Delete registry lock mencegah re-add.
+      if (deletedItemIds.has(row.id)) {
+        console.log('[RecallFox] pullFromCloud: skip item in delete registry', row.id);
+        // Pastikan juga dihapus dari IndexedDB (kalau masih ada)
+        await dbDeleteVaultItem(row.id);
+        await dbDeleteScreenshotBlob(row.id);
+        continue;
+      }
+      const local = await (await import('./db.js')).dbGetVaultItem(row.id);
+      if (!local || new Date(row.updated_at) > new Date(local.updated_at || 0)) {
+        await dbPutVaultItem(row);
+        // v1.2.0: Cache blob screenshot di background (jangan block pull)
+        // Hanya untuk item screenshot yang punya cloud URL dan belum ada di cache
+        // v1.3.0: Juga untuk type='document'
+        if ((row.type === 'screenshot' || row.type === 'document') && row.gdrive_file_url) {
+          const cached = await dbGetScreenshotBlob(row.id);
+          if (!cached) {
+            // Fire-and-forget — jangan tunggu, agar UI cepat muncul
+            downloadScreenshotBlob(row).catch(err => {
+              console.warn('[RecallFox] background blob cache failed for', row.id, ':', err.message || err.error);
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // Pull notes
+  const { data: notes, error: e2 } = await supabase
+    .from(NOTES_TABLE)
+    .select('*')
+    .eq('user_id', user.id)
+    .is('deleted_at', null)
+    .order('updated_at', { ascending: false });
+  if (!e2 && notes) {
+    const cloudIds = new Set(notes.map(r => r.id));
+    const localNotes = await dbGetAllNotes();
+    const now = Date.now();
+    for (const ln of localNotes) {
+      if (!cloudIds.has(ln.id) && ln.user_id === user.id) {
+        // v1.8.4: HAPUS isOwnDevice check — sama seperti vault items fix.
+        // v1.11.0: Jangan hapus note yang baru saja di-delete di device ini.
+        if (deletedNoteIds.has(ln.id)) {
+          await dbDeleteNote(ln.id);
+          continue;
+        }
+        const createdAt = new Date(ln.created_at || 0).getTime();
+        if (now - createdAt > 60000) {
+          await dbDeleteNote(ln.id);
+        }
+      }
+    }
+    for (const row of notes) {
+      // v1.11.0: SKIP note yang ada di delete registry — jangan re-add.
+      if (deletedNoteIds.has(row.id)) {
+        console.log('[RecallFox] pullFromCloud: skip note in delete registry', row.id);
+        await dbDeleteNote(row.id);
+        continue;
+      }
+      // v1.5.2 (P5 fix): Reuse localNotes yang sudah di-fetch di line ~807.
+      const ln = localNotes.find(n => n.id === row.id);
+      if (!ln || new Date(row.updated_at) > new Date(ln.updated_at || 0)) {
+        await dbPutNote(row);
+      }
+    }
+  }
+
+  return { ok: true };
+}
+
+// ===== Realtime subscription =====
+let _vaultSub = null;
+let _notesSub = null;
+
+export function subscribeRealtime(user, onChange) {
+  if (!user) return;
+  // Unsubscribe existing
+  unsubscribeRealtime();
+
+  _vaultSub = supabase
+    .channel(`realtime:vault_${user.id}`)
+    .on('postgres_changes',
+      { event: '*', schema: 'public', table: VAULT_TABLE, filter: `user_id=eq.${user.id}` },
+      async (payload) => {
+        const row = payload.new || payload.old;
+        if (payload.eventType === 'DELETE') {
+          if (row?.id) {
+            await dbDeleteVaultItem(row.id);
+            await dbDeleteScreenshotBlob(row.id);
+            // v1.11.0: Tambah ke delete registry supaya pull berikutnya tidak re-add.
+            addToDeleteRegistry(row.id, new Date().toISOString());
+            console.log('[RecallFox] realtime DELETE: added to registry', row.id);
+          }
+        } else if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+          if (row?.deleted_at) {
+            await dbDeleteVaultItem(row.id);
+            await dbDeleteScreenshotBlob(row.id);
+            // v1.11.0: Soft-delete di cloud → tambah ke registry.
+            addToDeleteRegistry(row.id, row.deleted_at);
+          } else {
+            // v1.11.0: Cek delete registry SEBELUM re-add item via realtime.
+            // Root cause: device lain INSERT item yang sudah dihapus di device ini
+            // (karena device lain belum sync). Kalau kita terima INSERT ini tanpa
+            // cek registry, item akan muncul kembali. Delete registry lock mencegah.
+            if (row?.id && isInDeleteRegistry(row.id)) {
+              console.log('[RecallFox] realtime INSERT/UPDATE: skip item in delete registry', row.id);
+              // Pastikan dihapus dari IndexedDB (kalau masih ada)
+              await dbDeleteVaultItem(row.id);
+              await dbDeleteScreenshotBlob(row.id);
+              return; // JANGAN panggil onChange supaya UI tidak re-render dengan item yang dihapus
+            }
+            await dbPutVaultItem(row);
+          }
+        }
+        onChange && onChange('vault', payload);
+      }
+    )
+    .subscribe();
+
+  _notesSub = supabase
+    .channel(`realtime:notes_${user.id}`)
+    .on('postgres_changes',
+      { event: '*', schema: 'public', table: NOTES_TABLE, filter: `user_id=eq.${user.id}` },
+      async (payload) => {
+        const row = payload.new || payload.old;
+        if (payload.eventType === 'DELETE') {
+          if (row?.id) {
+            await dbDeleteNote(row.id);
+            addNoteToDeleteRegistry(row.id, new Date().toISOString());
+          }
+        } else if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
+          if (row?.deleted_at) {
+            await dbDeleteNote(row.id);
+            addNoteToDeleteRegistry(row.id, row.deleted_at);
+          } else {
+            // v1.11.0: Cek delete registry SEBELUM re-add note via realtime.
+            if (row?.id && isNoteInDeleteRegistry(row.id)) {
+              console.log('[RecallFox] realtime INSERT/UPDATE: skip note in delete registry', row.id);
+              await dbDeleteNote(row.id);
+              return;
+            }
+            await dbPutNote(row);
+          }
+        }
+        onChange && onChange('notes', payload);
+      }
+    )
+    .subscribe();
+}
+
+export function unsubscribeRealtime() {
+  if (_vaultSub) { supabase.removeChannel(_vaultSub); _vaultSub = null; }
+  if (_notesSub) { supabase.removeChannel(_notesSub); _notesSub = null; }
+}
+
+// ===== Process sync queue (retry failed uploads) =====
+export async function processSyncQueue(user) {
+  if (!user) return;
+  // v1.6.3: Cleanup queue sebelum proses — hapus entry >7 hari / >100 entries
+  await cleanupSyncQueue();
+  const queue = await dbGetSyncQueue();
+  for (const entry of queue) {
+    try {
+      if (entry.op === 'upload_screenshot') {
+        const upRes = await uploadScreenshotBlob(user, entry.item_id, entry.data_url);
+        if (upRes.ok) {
+          // Update vault_items row dengan gdrive_file_url
+          // v1.5.3: Wrap dengan timeout supaya retry tidak hang
+          try {
+            await withTimeout(
+              supabase.from(VAULT_TABLE).update({
+                gdrive_file_id: upRes.path,
+                gdrive_file_url: upRes.url,
+                updated_at: new Date().toISOString()
+              }).eq('id', entry.item_id),
+              15000,
+              'retry_vault_update'
+            );
+          } catch (e) {
+            console.warn('[RecallFox] retry vault_items update failed:', e.message);
+            // Upload sudah berhasil, jangan re-queue — update cloud next pull akan sync
+          }
+          // v1.2.0: Juga insert ke screenshots table
+          try {
+            await withTimeout(
+              supabase.from(SCREENSHOTS_TABLE).upsert({
+                id: entry.item_id,
+                user_id: user.id,
+                vault_item_id: entry.item_id,
+                storage_path: upRes.path,
+                storage_url: upRes.url,
+                captured_at: new Date().toISOString()
+              }),
+              15000,
+              'retry_screenshots_upsert'
+            );
+          } catch (e) { /* non-fatal */ }
+          await dbDeleteSyncQueueItem(entry.id);
+        }
+      } else if (entry.op === 'upload_document') {
+        // v1.3.0: Retry document blob upload
+        const path = `user-${user.id}/${entry.item_id}.jpg`;
+        try {
+          const blob = dataUrlToBlob(entry.data_url) || await (await fetch(entry.data_url)).blob();
+          let uploadBlob = blob;
+          if (blob.type !== 'image/jpeg') {
+            const img = await createImageBitmap(blob);
+            const canvas = document.createElement('canvas');
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.drawImage(img, 0, 0);
+            uploadBlob = await new Promise(r => canvas.toBlob(r, 'image/jpeg', 0.92));
+          }
+          const { error } = await supabase.storage.from(STORAGE_BUCKET).upload(path, uploadBlob, { contentType: 'image/jpeg', upsert: true });
+          if (!error) {
+            const url = `${supabase.supabaseUrl}/storage/v1/object/public/${STORAGE_BUCKET}/${path}`;
+            await supabase.from(VAULT_TABLE).update({
+              gdrive_file_id: path,
+              gdrive_file_url: url,
+              updated_at: new Date().toISOString()
+            }).eq('id', entry.item_id);
+            await dbDeleteSyncQueueItem(entry.id);
+          }
+        } catch (e) {
+          console.warn('[RecallFox] document upload retry failed:', entry.id, e.message);
+        }
+      } else if (entry.op === 'upsert_vault') {
+        // v1.11.0: SKIP upsert kalau item ada di delete registry.
+        // Root cause bug: queue berisi upsert_vault untuk item yang sudah dihapus
+        // (di-queue sebelum hapus). Kalau diproses, item di-INSERT ulang ke cloud
+        // → muncul kembali di device lain. Delete registry lock mencegah ini.
+        if (entry.row?.id && isInDeleteRegistry(entry.row.id)) {
+          console.log('[RecallFox] processSyncQueue: skip upsert_vault for deleted item', entry.row.id);
+          await dbDeleteSyncQueueItem(entry.id);
+          continue;
+        }
+        const { error } = await supabase.from(VAULT_TABLE).upsert(entry.row);
+        if (!error) await dbDeleteSyncQueueItem(entry.id);
+      } else if (entry.op === 'delete_vault') {
+        const { error } = await supabase.from(VAULT_TABLE).delete().eq('id', entry.item_id);
+        if (!error) await dbDeleteSyncQueueItem(entry.id);
+      } else if (entry.op === 'upsert_note') {
+        const { error } = await supabase.from(NOTES_TABLE).upsert(entry.row);
+        if (!error) await dbDeleteSyncQueueItem(entry.id);
+      } else if (entry.op === 'update_note') {
+        const { error } = await supabase.from(NOTES_TABLE).update(entry.patch).eq('id', entry.note_id);
+        if (!error) await dbDeleteSyncQueueItem(entry.id);
+      } else if (entry.op === 'delete_note') {
+        const { error } = await supabase.from(NOTES_TABLE).delete().eq('id', entry.note_id);
+        if (!error) await dbDeleteSyncQueueItem(entry.id);
+      }
+    } catch (e) {
+      console.warn('[RecallFox] sync queue item failed:', entry.id, e.message);
+      // Keep in queue, retry next time
+    }
+  }
+}
+
+// ===== Utility: dataUrl → Blob (lebih reliable di mobile dibanding fetch) =====
+export function dataUrlToBlob(dataUrl) {
+  try {
+    if (!dataUrl || !dataUrl.startsWith('data:')) return null;
+    const [meta, b64] = dataUrl.split(',');
+    if (!b64) return null;
+    const mimeMatch = meta.match(/data:([^;]+)/);
+    const mime = mimeMatch ? mimeMatch[1] : 'image/png';
+    // Cek apakah base64
+    if (!meta.includes(';base64')) {
+      // Data URL non-base64 (URL-encoded) — rare, fallback ke fetch
+      return null;
+    }
+    const binary = atob(b64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new Blob([bytes], { type: mime });
+  } catch (e) {
+    console.warn('[RecallFox] dataUrlToBlob failed:', e.message);
+    return null;
+  }
+}

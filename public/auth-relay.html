@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>RecallFox Auth Relay</title>
+<style>
+body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#0E182A;color:#E8EEF7}
+.box{text-align:center;max-width:400px;padding:32px}
+.spinner{width:40px;height:40px;border:3px solid rgba(255,255,255,.2);border-top-color:#60A5FA;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px}
+@keyframes spin{to{transform:rotate(360deg)}}
+h2{font-size:16px;margin-bottom:8px}
+p{font-size:13px;color:#A3B0C2}
+.error{color:#FB7185}
+</style>
+</head>
+<body>
+<div class="box">
+<div class="spinner" id="spinner"></div>
+<h2 id="status">Menyambungkan...</h2>
+<p id="detail"></p>
+</div>
+<script>
+// auth-relay.html — Relay page for Google OAuth from browser extension.
+// Flow: Extension → Supabase OAuth → Google → redirect here with tokens in hash
+// → This page reads tokens → redirects to extension's getRedirectURL() with tokens
+// → Extension's launchWebAuthFlow intercepts → returns to extension → save session.
+(function() {
+  var params = new URLSearchParams(location.search);
+  var extRedirect = params.get('ext_redirect');
+  var hash = location.hash.substring(1);
+  var tokenParams = new URLSearchParams(hash);
+  var accessToken = tokenParams.get('access_token');
+  var refreshToken = tokenParams.get('refresh_token');
+  var expiresIn = tokenParams.get('expires_in');
+
+  var status = document.getElementById('status');
+  var detail = document.getElementById('detail');
+  var spinner = document.getElementById('spinner');
+
+  if (!extRedirect) {
+    status.textContent = 'Error';
+    status.classList.add('error');
+    detail.textContent = 'Parameter ext_redirect tidak ditemukan.';
+    spinner.style.display = 'none';
+    return;
+  }
+
+  if (!accessToken || !refreshToken) {
+    status.textContent = 'Token tidak ditemukan';
+    status.classList.add('error');
+    detail.textContent = 'OAuth callback tidak berisi access_token atau refresh_token.';
+    spinner.style.display = 'none';
+    return;
+  }
+
+  // Redirect to extension URL with tokens in hash
+  var callbackUrl = extRedirect + '#' + hash;
+  status.textContent = 'Mengalihkan ke addon...';
+  detail.textContent = 'Jika addon tidak terbuka otomatis, pastikan RecallFox addon aktif.';
+
+  // Small delay for UX
+  setTimeout(function() {
+    window.location.href = callbackUrl;
+  }, 500);
+})();
+</script>
+</body>
+</html>
