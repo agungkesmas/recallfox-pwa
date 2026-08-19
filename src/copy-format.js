@@ -279,7 +279,9 @@ async function maybeResizePng(pngBlob) {
 // ============================================================================
 export function buildBundleMediaReport(bundle, items, notes) {
   if (!bundle) return '';
-  const bundleName = bundle.name || 'Bundle tanpa nama';
+  // v1.13.2 FIX: PWA pakai bundle.title (bukan bundle.name seperti addon).
+  // Fallback chain: bundle.name (addon style) → bundle.title (PWA style) → 'Bundle tanpa nama'.
+  const bundleName = bundle.name || bundle.title || 'Bundle tanpa nama';
   const totalItems = (items?.length || 0) + (notes?.length || 0);
   const dateStr = new Date().toLocaleDateString('id-ID', { dateStyle: 'long' });
 
