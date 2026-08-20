@@ -683,6 +683,43 @@ async function copyItem(id) {
   }
 }
 
+// v1.13.6: Salin Saduran AI (ADHD) — pakai resumeContext yang sudah di-generate addon
+async function copySnapshotAdhd(id) {
+  try {
+    const items = await dbGetAllVaultItems();
+    const item = items.find(i => i.id === id);
+    if (!item || item.type !== 'snapshot') { showToast('Item snapshot tidak ditemukan'); return; }
+    if (item.resumeContext && item.resumeContext.length > 20) {
+      await navigator.clipboard.writeText(item.resumeContext);
+      showToast('📋 Saduran AI tersalin ke clipboard');
+    } else {
+      // PWA tidak bisa panggil OmniRouter — fallback ke body asli
+      const text = item.body || '';
+      await navigator.clipboard.writeText(text);
+      showToast('📄 Resume context belum ada — teks asli tersalin');
+    }
+  } catch (e) {
+    console.error('[RecallFox] copySnapshotAdhd error:', e);
+    showToast('Gagal salin: ' + e.message);
+  }
+}
+
+// v1.13.6: Salin teks percakapan mentah asli
+async function copySnapshotRaw(id) {
+  try {
+    const items = await dbGetAllVaultItems();
+    const item = items.find(i => i.id === id);
+    if (!item || item.type !== 'snapshot') { showToast('Item snapshot tidak ditemukan'); return; }
+    const text = item.body || '';
+    if (!text) { showToast('Snapshot kosong'); return; }
+    await navigator.clipboard.writeText(text);
+    showToast('📄 Teks percakapan asli tersalin (' + text.length + ' karakter)');
+  } catch (e) {
+    console.error('[RecallFox] copySnapshotRaw error:', e);
+    showToast('Gagal salin: ' + e.message);
+  }
+}
+
 // v1.12.1: buildBundleContent — kumpulkan semua anggota bundle jadi 1 string
 // rapi siap-paste. Pakai label tipe dari TYPE_LABELS supaya konsisten dengan UI.
 //
@@ -804,6 +841,8 @@ function openItemMenuSheet(itemId) {
     const body = sheet.querySelector('#itemMenuBody');
     body.innerHTML = `
       <h3 style="margin-bottom:8px;font-size:15px">${typeLabel} · ${title}</h3>
+      ${item.type === 'snapshot' && item.resumeContext ? '<button class="sheet-btn" data-action="copy-adhd">📋 Salin Saduran AI (ADHD)</button>' : ''}
+      ${item.type === 'snapshot' ? '<button class="sheet-btn" data-action="copy-raw">📄 Salin Teks Percakapan (Asli)</button>' : ''}
       <button class="sheet-btn" data-action="copy">📋 Salin ke Clipboard</button>
       ${item.type === 'bundle' ? '<button class="sheet-btn" data-action="copy-link-caption">📋 Salin Link + Keterangan</button>' : ''}
       <button class="sheet-btn" data-action="edit">✏️ Edit Judul & Isi</button>
@@ -825,6 +864,8 @@ function openItemMenuSheet(itemId) {
           if (action === 'pin') await togglePin(itemId);
           else if (action === 'move') openMoveToFolderSheet(itemId);
           else if (action === 'copy') copyItem(itemId);
+          else if (action === 'copy-adhd') copySnapshotAdhd(itemId);
+          else if (action === 'copy-raw') copySnapshotRaw(itemId);
           else if (action === 'copy-link-caption') await copyBundleLinkCaption(itemId);
           else if (action === 'fav') toggleFavorite(itemId);
           else if (action === 'archive') toggleArchiveItem(itemId);
