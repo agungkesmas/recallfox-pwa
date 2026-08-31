@@ -1,23 +1,35 @@
 /* src/styles/base.css — Design tokens + reset */
+/* v1.14.0 (Concept v3): palet porselen + tinta hangat + aksen iris (DNA brand
+   tetap #6d3df5). Nama token TIDAK berubah supaya semua view lama ikut bergaya
+   otomatis; token baru: --ink, --ember, --amber, --sage, --line2, --iris-tint,
+   --text-subtle, --font-d. */
 
 :root {
   --primary: #6d3df5;
-  --primary-dark: #5b2fd9;
+  --primary-dark: #5629d8;
   --primary-light: #8a54ff;
-  --bg: #fafaf9;
+  --iris-tint: #f1ecfe;
+  --bg: #f4f2ed;
   --surface: #ffffff;
-  --text: #1c1917;
-  --text-muted: #78716c;
-  --border: #e7e5e4;
+  --text: #191714;
+  --ink: #191714;
+  --text-muted: #8b8579;
+  --text-subtle: #b9b3a7;
+  --border: #e7e3da;
+  --line2: #efece5;
+  --ember: #ff6a55;
+  --amber: #e29d1f;
+  --sage: #33a06f;
   --danger: #ef4444;
   --success: #10b981;
   --warning: #f59e0b;
-  --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
-  --shadow: 0 2px 8px rgba(0,0,0,0.08);
-  --shadow-lg: 0 8px 24px rgba(0,0,0,0.12);
-  --radius: 12px;
-  --radius-sm: 8px;
-  --radius-lg: 20px;
+  --shadow-sm: 0 1px 2px rgba(25, 23, 20, 0.04);
+  --shadow: 0 1px 3px rgba(25, 23, 20, 0.06);
+  --shadow-lg: 0 12px 30px rgba(25, 23, 20, 0.14);
+  --radius: 16px;
+  --radius-sm: 10px;
+  --radius-lg: 24px;
+  --font-d: 'Space Grotesk', 'Inter', system-ui, sans-serif;
   --safe-top: env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
@@ -25,7 +37,7 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
 body {
-  font-family: -apple-system, system-ui, 'Segoe UI', Roboto, sans-serif;
+  font-family: 'Inter', -apple-system, system-ui, 'Segoe UI', Roboto, sans-serif;
   background: var(--bg);
   color: var(--text);
   font-size: 14px;

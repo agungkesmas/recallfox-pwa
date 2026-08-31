@@ -1,0 +1,231 @@
+/* src/styles/v3.css — Concept v3 "modern · elegan · simpel" (v1.14.0)
+   Bahasa visual: permukaan porselen, tinta hangat, satu aksen iris.
+   Ikon garis SVG, kartu hairline 1px, dock melayang frosted.
+   File ini DIMUAT TERAKHIR di main.js — semua override menimpa views/components
+   tanpa mengubah markup fungsi. Token warna didefinisikan di base.css. */
+
+/* ===== Dock melayang (bottom-nav) ===== */
+.bottom-nav {
+  left: 12px; right: 12px; bottom: calc(10px + var(--safe-bottom));
+  height: 62px; padding: 0 6px;
+  background: rgba(255, 255, 255, 0.86);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(231, 227, 218, 0.9);
+  border-radius: 22px;
+  box-shadow: 0 12px 30px rgba(25, 23, 20, 0.16);
+  border-top: 1px solid rgba(231, 227, 218, 0.9);
+}
+.nav-btn {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 3px; padding: 6px 4px; border-radius: 14px;
+  color: #a49d8f; position: relative; transition: color 0.15s;
+}
+.nav-btn .nav-ic {
+  font-size: 20px; line-height: 1; display: grid; place-items: center;
+  position: relative; z-index: 1;
+}
+.nav-btn .nav-ic svg {
+  width: 20px; height: 20px; stroke: currentColor; fill: none;
+  stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round;
+}
+.nav-btn .nav-lb {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.04em;
+  position: relative; z-index: 1;
+}
+.nav-btn.active { color: var(--primary); }
+.nav-btn.active::before {
+  content: ""; position: absolute; top: 7px; left: 50%; transform: translateX(-50%);
+  width: 34px; height: 34px; border-radius: 12px; background: var(--iris-tint, #f1ecfe);
+  z-index: 0;
+}
+
+/* ===== FAB — kotak tinta radius 19 ===== */
+.fab {
+  bottom: calc(88px + var(--safe-bottom));
+  width: 54px; height: 54px; border-radius: 19px;
+  background: var(--ink); color: #fff;
+  border: none;
+  box-shadow: 0 14px 28px rgba(25, 23, 20, 0.35);
+}
+.fab svg { width: 22px; height: 22px; stroke: #fff; stroke-width: 2; stroke-linecap: round; fill: none; }
+
+/* Padding bawah main menyesuaikan dock melayang */
+.app-main { padding-bottom: 148px; }
+
+/* ===== Kartu hairline — ganti bayangan berat ===== */
+.media-card, .note-card, .settings-card {
+  box-shadow: none;
+  border: 1px solid var(--line);
+}
+.media-card { border: 1px solid var(--line); }
+.media-card.selected { border: 2px solid var(--primary); }
+.media-card .thumb { background: linear-gradient(135deg, #f5f3ee, #e9e5dc); }
+.note-card { border: 1px solid var(--line); }
+.note-card.selected { border: 2px solid var(--primary); }
+
+/* Judul view memakai Space Grotesk (angka & heading tegas, elegan) */
+.view-header h2 { font-family: var(--font-d); letter-spacing: -0.02em; }
+.settings-card h3 { font-family: var(--font-d); }
+.media-card .date, .note-meta { font-variant-numeric: tabular-nums; }
+
+/* ===== Bottom sheet — baris hairline minimal ===== */
+.sheet-content { border-radius: 26px 26px 0 0; }
+.sheet-content h3 { font-family: var(--font-d); font-weight: 600; letter-spacing: -0.01em; }
+.sheet-btn {
+  display: flex; align-items: center; gap: 13px;
+  background: transparent; border-radius: 0; margin-bottom: 0;
+  padding: 13px 2px; border-bottom: 1px solid var(--line2);
+  font-size: 13.5px; font-weight: 600;
+}
+.sheet-btn:active { background: var(--bg); }
+.sheet-btn .sheet-ic {
+  width: 34px; height: 34px; border-radius: 11px; flex-shrink: 0;
+  background: var(--bg); border: 1px solid var(--line);
+  display: grid; place-items: center; font-size: 16px; font-style: normal;
+}
+.sheet-btn.cancel, .sheet-btn:last-of-type { border-bottom: none; }
+.sheet-btn.cancel { justify-content: center; color: var(--text-muted); padding-top: 14px; }
+
+/* Toast tinta */
+.toast { background: rgba(25, 23, 20, 0.95); }
+
+/* ===== ===== ===== FOKUS — layar gelap (timer + tape) ===== ===== ===== */
+.fokus {
+  background: #161210;
+  min-height: calc(100vh - 110px);
+  margin: -12px -14px -148px;      /* larut ke tepi layar + ke bawah sampai dock */
+  padding: 4px 14px 172px;
+  border-radius: 0;
+}
+
+/* Segmented switch Timer | Tape */
+.seg {
+  margin: 14px 4px 0;
+  display: flex; background: #251f19; border-radius: 13px; padding: 4px;
+}
+.seg button {
+  flex: 1; padding: 8px 0; border-radius: 10px;
+  font-size: 12px; font-weight: 700; color: #a89e90;
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  transition: all 0.18s;
+}
+.seg button svg {
+  width: 13px; height: 13px; stroke: currentColor; fill: none;
+  stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+}
+.seg button.on { background: var(--paper, #f4f2ed); color: var(--ink); }
+.seg button.on.amb { background: #f5e7c8; color: #4a3608; }
+
+/* Ring timer ala app fokus premium */
+.timerwrap { display: grid; place-items: center; padding: 22px 0 6px; position: relative; }
+.ringwrap { position: relative; width: 212px; height: 212px; }
+.ringwrap svg { width: 100%; height: 100%; }
+.ring-bg { fill: none; stroke: #2c251e; stroke-width: 5; }
+.ring-fg { fill: none; stroke: var(--ember); stroke-width: 5; stroke-linecap: round; transition: stroke-dashoffset 0.4s; }
+.ring-fg.brk { stroke: var(--sage); }
+.ringin { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+.ringin .t {
+  font-family: var(--font-d); font-size: 46px; font-weight: 300;
+  letter-spacing: -0.02em; color: #f3ede4; font-variant-numeric: tabular-nums;
+}
+.ringin .m { font-size: 9.5px; font-weight: 700; letter-spacing: 0.34em; color: #8f8578; margin-top: 2px; }
+
+/* Preset chips */
+.presets { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; padding: 10px 10px 4px; }
+.pch {
+  font-family: var(--font-d); font-size: 11px; font-weight: 600;
+  padding: 6px 13px; border-radius: 99px; border: 1px solid #373028; color: #cabfae;
+  cursor: pointer;
+}
+.pch.on { border-color: var(--ember); color: var(--ember); }
+
+/* Baris custom preset */
+.custom-row {
+  display: flex; gap: 10px; align-items: center; justify-content: center;
+  padding: 8px 10px 0; flex-wrap: wrap;
+}
+.custom-row label { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #cabfae; }
+.custom-row input {
+  width: 58px; padding: 6px 8px; border-radius: 9px;
+  background: #251f19; border: 1px solid #373028; color: #f3ede4;
+  font-family: var(--font-d); font-size: 12px; text-align: center;
+}
+.custom-row input:focus { outline: none; border-color: var(--ember); box-shadow: none; }
+.custom-apply {
+  padding: 7px 14px; border-radius: 99px; border: 1px solid var(--ember);
+  color: var(--ember); font-size: 11px; font-weight: 700; background: transparent;
+}
+
+/* Kontrol play / reset / skip */
+.ctr { display: flex; gap: 14px; align-items: center; justify-content: center; padding: 16px 0 8px; }
+.ctr .big {
+  width: 60px; height: 60px; border-radius: 50%; background: var(--ember);
+  display: grid; place-items: center;
+  box-shadow: 0 10px 26px rgba(255, 106, 85, 0.35);
+  transition: transform 0.15s, background 0.2s;
+}
+.ctr .big:active { transform: scale(0.93); }
+.ctr .big svg { width: 20px; height: 20px; fill: #2a0f09; stroke: none; }
+.ctr .big.brk { background: var(--sage); box-shadow: 0 10px 26px rgba(51, 160, 111, 0.35); }
+.ctr .big.brk svg { fill: #0c2519; }
+.ctr .sm {
+  width: 46px; height: 46px; border-radius: 50%; border: 1px solid #373028;
+  display: grid; place-items: center; color: #cabfae;
+}
+.ctr .sm svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* Meta bawah timer */
+.fmeta { display: flex; gap: 14px; justify-content: center; align-items: center; font-size: 10.5px; color: #a89e90; }
+.cyc { display: inline-flex; gap: 4px; margin: 0 5px; vertical-align: 1px; }
+.cyc i { width: 5.5px; height: 5.5px; border-radius: 50%; background: #3a322a; }
+.cyc i.on { background: var(--ember); }
+.bellbtn { font-size: 10.5px; color: #cabfae; text-decoration: underline dotted; text-underline-offset: 3px; }
+
+/* ===== Tape ===== */
+.tapehead { display: flex; align-items: center; justify-content: space-between; padding: 16px 4px 8px; }
+.tapehead h2 { font-family: var(--font-d); font-size: 18px; font-weight: 600; color: #f3ede4; letter-spacing: -0.01em; }
+.gh-dark {
+  width: 34px; height: 34px; border-radius: 11px; background: #251f19;
+  border: 1px solid #373028; color: #cabfae; display: grid; place-items: center;
+}
+.gh-dark svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; }
+
+.tape-edit { margin: 4px 4px 0; }
+.tape-edit textarea {
+  width: 100%; resize: vertical; min-height: 108px;
+  background: #251f19; border: 1px solid #373028; border-radius: 13px;
+  color: #f3ede4; padding: 11px 13px;
+  font-family: var(--font-d); font-size: 13px; line-height: 1.6;
+  font-variant-numeric: tabular-nums;
+}
+.tape-edit textarea:focus { outline: none; border-color: #5a4c3a; box-shadow: none; }
+.tape-edit textarea::placeholder { color: #6f6555; }
+
+/* Struk hasil — kertas terang di atas layar gelap */
+.receipt {
+  margin: 10px 4px 0; background: #fbf9f4; border-radius: 14px; padding: 14px 16px;
+  font-family: var(--font-d); font-size: 12.5px; color: #3d3427;
+  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.4);
+  min-height: 58px;
+}
+.receipt .tl { display: flex; justify-content: space-between; padding: 3px 0; font-variant-numeric: tabular-nums; gap: 10px; }
+.receipt .tl span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.receipt .tl.dim { opacity: 0.45; }
+.receipt .tl.sub { border-top: 1.5px dashed #d9cfae; margin-top: 6px; padding-top: 7px; }
+.receipt .tl.res { border-top: 1.5px dashed #d9cfae; margin-top: 6px; padding-top: 8px; font-weight: 700; font-size: 13.5px; }
+.receipt:empty::before { content: "Tulis baris pertama di atas — hasil hitung muncul di sini."; opacity: 0.5; font-size: 11.5px; }
+
+.tstatus { display: flex; align-items: center; gap: 7px; font-size: 10px; color: #c99b3f; padding: 10px 6px 2px; }
+.tstatus .tdot { width: 7px; height: 7px; min-width: 7px; border-radius: 50%; background: var(--amber); }
+.tstatus.err { color: #ff8d7e; }
+.tstatus.err .tdot { background: #ff8d7e; }
+
+.tacts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 10px 4px 0; }
+.tacts button {
+  display: flex; align-items: center; justify-content: center; gap: 5px;
+  padding: 9px 0; border-radius: 11px; border: 1px solid #373028;
+  color: #e5c887; font-size: 10.5px; font-weight: 700; background: transparent;
+}
+.tacts button:active { background: #251f19; }
+.tacts button:disabled { opacity: 0.5; }
+.tacts svg { width: 12px; height: 12px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }

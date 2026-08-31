@@ -11,6 +11,7 @@
 import './styles/base.css';
 import './styles/components.css';
 import './styles/views.css';
+import './styles/v3.css';  // v1.14.0: Concept v3 — dock melayang, hairline, Fokus (paling akhir = override)
 
 import { getSession, onAuthChange, handleOAuthCallback } from './auth.js';
 import { pullFromCloud, subscribeRealtime, unsubscribeRealtime, processSyncQueue, createFileItem } from './sync.js';
@@ -19,9 +20,12 @@ import { renderMedia, startCaptureFlow, startDocumentFlow } from './views/media.
 import { renderNotes, openNoteEditor } from './views/notes.js';
 import { renderSettings } from './views/settings.js';
 import { renderVault, isUserTogglingFolders, handleCreateFolder } from './views/vault.js';
+import { renderFocus } from './views/focus.js';  // v1.14.0: Tab Fokus (Pomodoro + RecallTape, local-first)
 import { showSharePreviewModal } from './share-target.js';  // v1.9.0
 
-let _currentView = 'media';
+// v1.14.0: default view 'notes' (Concept v3 — alat harian paling sering dipakai
+// dibuka duluan; media/vault tetap satu tap via dock).
+let _currentView = 'notes';
 let _realtimeBound = false;
 let _pollTimer = null;
 let _retryTimer = null;
@@ -251,24 +255,37 @@ function refreshCurrentView() {
   if (window.__rfUser) navigateTo(_currentView);
 }
 
+// v1.14.0: Ikon garis SVG nav (Concept v3) — stroke via CSS (.nav-ic svg)
+const NAV_IC = {
+  notes: '<svg viewBox="0 0 24 24"><path d="M7 3h7l5 5v11a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M9 13h6M9 17h4"/></svg>',
+  media: '<svg viewBox="0 0 24 24"><path d="M4 8a2 2 0 0 1 2-2h2l1.5-2h5L16 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8Z"/><circle cx="12" cy="12.5" r="3.2"/></svg>',
+  focus: '<svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="7.5"/><path d="M12 10v3.5l2.5 1.5"/><path d="M9.5 2.5h5"/></svg>',
+  vault: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></svg>',
+  acc: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.6"/><path d="M5 20a7 7 0 0 1 14 0"/></svg>',
+  plus: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>'
+};
+
 function renderShell(user) {
   const app = document.getElementById('app');
   app.innerHTML = `
     <div class="app-shell">
       <main class="app-main" id="appMain"></main>
-      <button class="fab" id="fabAdd" aria-label="Tambah">+</button>
+      <button class="fab" id="fabAdd" aria-label="Tambah">${NAV_IC.plus}</button>
       <nav class="bottom-nav">
+        <button class="nav-btn ${_currentView === 'notes' ? 'active' : ''}" data-view="notes">
+          <span class="nav-ic">${NAV_IC.notes}</span><span class="nav-lb">Catatan</span>
+        </button>
         <button class="nav-btn ${_currentView === 'media' ? 'active' : ''}" data-view="media">
-          <span class="nav-ic">📸</span><span class="nav-lb">Media</span>
+          <span class="nav-ic">${NAV_IC.media}</span><span class="nav-lb">Media</span>
+        </button>
+        <button class="nav-btn ${_currentView === 'focus' ? 'active' : ''}" data-view="focus">
+          <span class="nav-ic">${NAV_IC.focus}</span><span class="nav-lb">Fokus</span>
         </button>
         <button class="nav-btn ${_currentView === 'vault' ? 'active' : ''}" data-view="vault">
-          <span class="nav-ic">🗂️</span><span class="nav-lb">Vault</span>
-        </button>
-        <button class="nav-btn ${_currentView === 'notes' ? 'active' : ''}" data-view="notes">
-          <span class="nav-ic">📝</span><span class="nav-lb">Catatan</span>
+          <span class="nav-ic">${NAV_IC.vault}</span><span class="nav-lb">Vault</span>
         </button>
         <button class="nav-btn ${_currentView === 'settings' ? 'active' : ''}" data-view="settings">
-          <span class="nav-ic">⚙️</span><span class="nav-lb">Akun</span>
+          <span class="nav-ic">${NAV_IC.acc}</span><span class="nav-lb">Akun</span>
         </button>
       </nav>
     </div>
@@ -289,13 +306,13 @@ function openFabMenu() {
     <div class="sheet-content">
       <div class="sheet-handle"></div>
       <h3>Tambah Baru</h3>
-      <button class="sheet-btn" data-action="camera">📷 Ambil Foto</button>
-      <button class="sheet-btn" data-action="gallery">🖼️ Dari Galeri</button>
-      <button class="sheet-btn" data-action="document">📄 Scan Dokumen</button>
-      <button class="sheet-btn" data-action="paste">📋 Paste dari Clipboard</button>
-      <button class="sheet-btn" data-action="upload-file">📄 Upload File Teks</button>
-      <button class="sheet-btn" data-action="note">📝 Catatan Baru</button>
-      <button class="sheet-btn" data-action="folder">📁 Folder Baru</button>
+      <button class="sheet-btn" data-action="camera"><span class="sheet-ic">📷</span>Ambil Foto</button>
+      <button class="sheet-btn" data-action="gallery"><span class="sheet-ic">🖼️</span>Dari Galeri</button>
+      <button class="sheet-btn" data-action="document"><span class="sheet-ic">📄</span>Scan Dokumen</button>
+      <button class="sheet-btn" data-action="paste"><span class="sheet-ic">📋</span>Paste dari Clipboard</button>
+      <button class="sheet-btn" data-action="upload-file"><span class="sheet-ic">📎</span>Upload File Teks</button>
+      <button class="sheet-btn" data-action="note"><span class="sheet-ic">📝</span>Catatan Baru</button>
+      <button class="sheet-btn" data-action="folder"><span class="sheet-ic">📁</span>Folder Baru</button>
       <button class="sheet-btn cancel" data-action="cancel">Batal</button>
     </div>
   `;
@@ -442,6 +459,7 @@ function navigateTo(view) {
   if (view === 'media') renderMedia(user, refreshCurrentView);
   else if (view === 'vault') renderVault(user, refreshCurrentView);
   else if (view === 'notes') renderNotes(user, refreshCurrentView);
+  else if (view === 'focus') renderFocus(user, refreshCurrentView);
   else if (view === 'settings') renderSettings(user, () => showLogin());
 }
 
