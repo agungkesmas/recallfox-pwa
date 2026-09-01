@@ -1,4 +1,11 @@
 // src/views/tape.js — RecallTape lembar (PWA)
+// v1.15.1: FIX KEYBOARD PONSEL — auto-format & Enter=hitung kini lewat
+// BEFOREINPUT (InputEvent) sebagai satu pintu, bukan keydown. Addon memakai
+// keydown (e.key='+') yang hanya bekerja pada keyboard fisik desktop; di PWA
+// ponsel keyboard virtual mengirim teks via IME (keydown 'Unidentified') sehingga
+// ketik 1000 lalu '+' TIDAK pindah baris dan Enter tidak menghitung. Kini
+// perilaku identik di desktop & ponsel + repair IME composition ('1000+' →
+// '1000\n+   '). Logika lain tetap port setia dari floating tape-cs.js.
 // v1.15.0: PORT SETIA dari floating RecallTape addon (content/tape-cs.js
 // v3.23.x–v3.24.5) — bentuk, warna, dan perilaku SAMA dengan floater:
 //
@@ -156,71 +163,97 @@ function collectOpLines(text) {
   return out;
 }
 
-// Ketik digit di baris kosong → auto-prefix "+   "; operator di ujung baris
-// berisi → auto baris baru (port handleAutoFormatKey)
-function handleAutoFormatKey(e, ta, hooks) {
-  if (e.key.length !== 1) return;
-  if (e.ctrlKey || e.metaKey || e.altKey) return;
+// ============================================================================
+// v1.15.1 FIX KEYBOARD PONSEL (IME) — satu pintu BEFOREINPUT
+// ============================================================================
+// Addon menangkap keydown (e.key='+') — di DESKTOP keyboard fisik itu OK,
+// tapi di PWA ponsel keyboard virtual (GBoard/Samsung/iOS) mengirim teks via
+// IME: keydown hanya 'Unidentified', teks datang lewat beforeinput/input
+// (inputType 'insertText' / 'insertLineBreak'). Akibatnya auto-prefix,
+// auto-newline operator, dan Enter=hitung TIDAK PERNAH terpicu di ponsel
+// (terbukti probe real-browser: ketik 1000 lalu '+' → '1000+' inline).
+//
+// Solusi: tangkap BEFOREINPUT (InputEvent, didukung semua browser modern,
+// desktop + ponsel, bisa preventDefault) sebagai satu-satunya pintu:
+//   • insertText 1 char digit pada baris kosong EOL  → sisip '+   <digit>'
+//   • insertText 1 char operator pada baris berisi EOL → sisip '\n<op>   '
+//   • insertLineBreak (Enter)  → ENTER = HITUNG OTOMATIS
+// keydown hanya dipakai Ctrl/Cmd+Enter (simpan). Jaring pengaman IME yang
+// tidak bisa di-cancel (composition): repair pola '1000+' → '1000\n+   '.
+
+function lineMetaAt(val, pos) {
+  const lineStart = val.lastIndexOf('\n', pos - 1) + 1;
+  const nl = val.indexOf('\n', pos);
+  const lineEnd = nl === -1 ? val.length : nl;
+  return { lineStart, lineEnd };
+}
+
+// beforeinput — auto-format ketik + Enter=hitung (desktop & ponsel seragam)
+function handleBeforeInput(e, ta, hooks) {
+  const it = e.inputType;
+
+  // ---- ENTER = HITUNG OTOMATIS (insertLineBreak; desktop & ponsel IME) ----
+  if (it === 'insertLineBreak' || it === 'insertParagraph') {
+    // Shift+Enter = newline polos tanpa hitung (paritas addon: !e.shiftKey).
+    // InputEvent tidak menjamin modifier state → keydown Enter (yang SELALU
+    // mendahului beforeinput, desktop & ponsel) menandai shift via flag.
+    if (ta.__rfShiftEnter) { ta.__rfShiftEnter = false; return; }
+    try { if (e.getModifierState && e.getModifierState('Shift')) return; } catch (err) {}
+    if (computeEnter(ta, hooks)) e.preventDefault();
+    return;
+  }
+
+  if (it !== 'insertText') return;
+  const data = e.data;
+  if (typeof data !== 'string' || data.length !== 1) return; // paste/IME multi-char → default
+  if (ta.selectionStart !== ta.selectionEnd) return;         // ada selection → default (paritas addon)
 
   const pos = ta.selectionStart;
   const val = ta.value;
-  if (ta.selectionStart !== ta.selectionEnd) return;
+  const { lineStart, lineEnd } = lineMetaAt(val, pos);
+  if (pos !== lineEnd) return;                                // hanya di ujung baris (paritas addon)
 
-  const lineStart = val.lastIndexOf('\n', pos - 1) + 1;
-  const currentLine = val.slice(lineStart, pos);
-  const trimmedCurrent = currentLine.trim();
-
-  const atEndOfLine = (pos === val.length) || (val[pos] === '\n');
-  if (!atEndOfLine) return;
-
+  const trimmedCurrent = val.slice(lineStart, pos).trim();
   if (isSepLine(trimmedCurrent) || isResultLine(trimmedCurrent)) return;
 
-  const key = e.key;
-
-  if (/^\d$/.test(key) && trimmedCurrent === '') {
+  // Digit pada baris kosong → auto-prefix '+   <digit>'
+  if (/^\d$/.test(data) && trimmedCurrent === '') {
     e.preventDefault();
-    const insert = '+' + OP_GAP + key;
-    const before = val.slice(0, pos);
-    const after = val.slice(pos);
-    ta.value = before + insert + after;
-    ta.setSelectionRange(pos + insert.length, pos + insert.length);
+    ta.setRangeText('+' + OP_GAP + data, pos, pos, 'end');
+    ta.scrollTop = ta.scrollHeight;
     hooks.after();
     return;
   }
 
-  if (/[+\-*/]/.test(key) && trimmedCurrent !== '') {
+  // Operator di ujung baris berisi → LANGSUNG PINDAH BARIS BARU (inti perilaku)
+  if (/[+\-*/]/.test(data) && trimmedCurrent !== '') {
     e.preventDefault();
-    const insert = '\n' + key + OP_GAP;
-    const before = val.slice(0, pos);
-    const after = val.slice(pos);
-    ta.value = before + insert + after;
-    ta.setSelectionRange(pos + insert.length, pos + insert.length);
+    ta.setRangeText('\n' + data + OP_GAP, pos, pos, 'end');
     ta.scrollTop = ta.scrollHeight;
     hooks.after();
   }
 }
 
 // ENTER = HITUNG: reformat semua baris lalu sisipkan separator + hasil
-// berjalan langsung di editor (port handleEnterKey)
-function handleEnterKey(e, ta, hooks) {
+// langsung di editor. return true jika diproses (caller mencegah default),
+// false → biarkan newline polos. Logika identik dengan addon handleEnterKey.
+function computeEnter(ta, hooks) {
+  // let (bukan const): nilai/caret diperbarui setelah reformat — paritas addon
   let pos = ta.selectionStart;
   let val = ta.value;
 
-  if (ta.selectionStart !== ta.selectionEnd) return;
+  if (ta.selectionStart !== ta.selectionEnd) return false;
 
   const lineStart = val.lastIndexOf('\n', pos - 1) + 1;
-  const lineEnd = pos;
-  const currentLine = val.slice(lineStart, lineEnd).trim();
+  const currentLine = val.slice(lineStart, pos).trim();
 
-  if (!currentLine) return;
+  if (!currentLine) return false;
 
   const isOpLine = /^([+\-*/]?)\s*[\d.,]+\s*(k|rb|jt|juta|ribu|m|b|bn)?%?/i.test(currentLine);
-  if (!isOpLine) return;
+  if (!isOpLine) return false;
 
   const opMatch = currentLine.match(/^([+\-*/]?)\s*([\d.,]+(?:k|rb|jt|juta|ribu|m|b|bn)?%?)\s*(.*)$/i);
-  if (!opMatch) return;
-
-  e.preventDefault();
+  if (!opMatch) return false;
 
   const reformattedVal = reformatAllOpLines(val);
   if (reformattedVal !== val) {
@@ -261,6 +294,31 @@ function handleEnterKey(e, ta, hooks) {
   ta.scrollTop = ta.scrollHeight;
 
   hooks.after();
+  return true;
+}
+
+// Jaring pengaman IME/composition: keyboard tertentu meng-commit operator
+// lewat composition (beforeinput insertCompositionText TIDAK bisa di-cancel
+// — preventDefault diabaikan spesifikasi). Setelah commit, perbaiki pola yang
+// jelas: baris berisi angka lalu BERAKHIRI operator inline, mis. '1000+' →
+// '1000\n+   '. Pola ini tidak pernah muncul di tape terformat (operator
+// selalu di awal baris + 3 spasi), jadi aman. Return true jika diperbaiki.
+function repairInlineOp(ta, hooks) {
+  const pos = ta.selectionStart;
+  if (ta.selectionStart !== ta.selectionEnd) return false;
+  const val = ta.value;
+  const { lineStart, lineEnd } = lineMetaAt(val, pos);
+  if (pos !== lineEnd) return false;                 // hanya ujung baris
+  const line = val.slice(lineStart, lineEnd);
+  const m = line.match(/^([\d.,]+(?:\s*(?:k|rb|jt|juta|ribu|m|b|bn))?)([+\-*/])$/i);
+  if (!m) return false;
+  const fixed = val.slice(0, lineStart) + m[1] + '\n' + m[2] + OP_GAP + val.slice(lineEnd);
+  const newPos = lineStart + m[1].length + 1 + m[2].length + OP_GAP.length;
+  ta.value = fixed;
+  ta.setSelectionRange(newPos, newPos);
+  ta.scrollTop = ta.scrollHeight;
+  hooks.after();
+  return true;
 }
 
 // Double-click baris hasil → copy nilai (port handleResultLineDoubleClick)
@@ -490,7 +548,7 @@ function mountSheet(container, user, data) {
         '<button class="rbtn rts-close" title="Tutup lembar ini">' + SVG.close + '</button>' +
       '</div>' +
     '</div>' +
-    '<textarea class="rts-editor" spellcheck="false" placeholder="' + esc(PLACEHOLDER) + '"></textarea>' +
+    '<textarea class="rts-editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" inputmode="text" placeholder="' + esc(PLACEHOLDER) + '"></textarea>' +
     '<div class="rts-status"><span class="rts-autosave">✓ Tersimpan otomatis</span></div>' +
     '<div class="rts-toast"></div>';
   container.appendChild(card);
@@ -567,13 +625,30 @@ function mountSheet(container, user, data) {
 
   const hooks = { after: () => { updateStatus(); scheduleSave(); } };
 
-  ta.addEventListener('input', () => { updateStatus(); scheduleSave(); });
+  // v1.15.1: SATU pintu input = beforeinput (desktop & ponsel IME seragam).
+  // keydown hanya Ctrl/Cmd+Enter (simpan) — auto-format & Enter=hitung pindah
+  // ke beforeinput supaya keyboard virtual ponsel ikut berfungsi.
+  ta.addEventListener('beforeinput', (e) => {
+    try { handleBeforeInput(e, ta, hooks); } catch (err) { console.error('[RecallFox/Tape] beforeinput error:', err); }
+  });
+
+  // input biasa: repair IME + status live + auto-save. Selama composition
+  // aktif ditunda (menulis nilai di tengah komposisi merusak IME);
+  // compositionend mengevaluasi sekali di akhir.
+  let composing = false;
+  ta.addEventListener('compositionstart', () => { composing = true; });
+  ta.addEventListener('compositionend', () => {
+    composing = false;
+    try { if (!repairInlineOp(ta, hooks)) { updateStatus(); scheduleSave(); } } catch (err) { console.error('[RecallFox/Tape] composition repair error:', err); }
+  });
+  ta.addEventListener('input', () => {
+    if (composing) return;
+    try { if (!repairInlineOp(ta, hooks)) { updateStatus(); scheduleSave(); } } catch (err) { console.error('[RecallFox/Tape] input error:', err); }
+  });
   ta.addEventListener('keydown', (e) => {
+    // Shift+Enter: tandai sebelum beforeinput (InputEvent tak punya shiftKey)
+    if (e.key === 'Enter' && e.shiftKey) { ta.__rfShiftEnter = true; setTimeout(() => { try { ta.__rfShiftEnter = false; } catch (err) {} }, 0); }
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); doSave(); return; }
-    try {
-      handleAutoFormatKey(e, ta, hooks);
-      if (e.key === 'Enter' && !e.shiftKey) handleEnterKey(e, ta, hooks);
-    } catch (err) { console.error('[RecallFox/Tape] keydown error:', err); }
   });
   ta.addEventListener('dblclick', () => handleResultLineDoubleClick(ta, toast));
   updateStatus();
