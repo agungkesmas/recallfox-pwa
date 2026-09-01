@@ -627,6 +627,18 @@
   border: 1px solid var(--border); background: var(--surface);
 }
 
+/* ===== v1.15.2: Zona unduh viewer (paritas addon v3.24.6) =====
+   Tombol unduh dipasang di PUNCAK modal — tepat di bawah header judul/rename,
+   sebelum gambar — supaya gampang dijangkau tanpa scroll melewati preview besar. */
+.viewer-download-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.viewer-download-row .btn { width: 100%; }
+.viewer-download-row .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
 /* ===== v1.6.4: Viewer navigator (prev/next/select) ===== */
 .viewer-navigator {
   display: flex; align-items: center; gap: 6px;

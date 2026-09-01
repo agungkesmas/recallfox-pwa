@@ -140,6 +140,60 @@ function updateBatchUI() {
   if (countEl) countEl.textContent = _batchSelected.size + ' dipilih';
 }
 
+// ============================================================
+// v1.15.2: Tombol unduh viewer — paritas tombol unduh addon (PDF/JPG/PNG):
+// dipasang di ATAS modal (tepat di bawah header judul/rename), sebelum gambar,
+// supaya gampang dijangkau tanpa scroll — alur rename → unduh satu zona di puncak.
+// JPG/PNG yang relevan untuk PWA (gambar tersimpan sebagai gambar; PDF hanya di addon).
+// ============================================================
+function reencodeDataUrl(dataUrl, mime) {
+  // Re-encode dataUrl ke mime lain via canvas (jpeg→png / png→jpeg).
+  // resolve(null) bila gagal decode/encode — caller tampilkan toast error.
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth;
+        c.height = img.naturalHeight;
+        c.getContext('2d').drawImage(img, 0, 0);
+        resolve(c.toDataURL(mime, 0.92));
+      } catch (e) {
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+}
+
+async function downloadViewerImage(dataUrl, item, format) {
+  if (!dataUrl) {
+    showToast('Gambar belum tersedia — tunggu load selesai', true);
+    return;
+  }
+  try {
+    let outUrl = dataUrl;
+    const isPngSrc = /^data:image\/png/i.test(dataUrl);
+    // Sumber sudah cocok format → unduh apa adanya (byte asli, tanpa re-encode);
+    // beda format → konversi via canvas (JPG q0.92 / PNG lossless).
+    if ((format === 'png' && !isPngSrc) || (format === 'jpg' && isPngSrc)) {
+      outUrl = await reencodeDataUrl(dataUrl, format === 'png' ? 'image/png' : 'image/jpeg');
+      if (!outUrl) throw new Error('Konversi format gagal');
+    }
+    const safeName = ((item.title || 'screenshot').replace(/[\\/:*?"<>|]+/g, '_').trim() || 'screenshot').slice(0, 60);
+    const a = document.createElement('a');
+    a.href = outUrl;
+    a.download = `${safeName}.${format}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    showToast(`✓ Diunduh: ${safeName}.${format}`);
+  } catch (e) {
+    showToast('Gagal unduh: ' + e.message, true);
+  }
+}
+
 async function openItemDetail(id) {
   // v1.8.6: Also exclude isGroup items in navigator — folders shouldn't appear in dropdown
   const allItems = (await dbGetAllVaultItems()).filter(i => (i.type === 'screenshot' || i.type === 'document') && !i.archived && !(i.source?.isGroup));
@@ -177,6 +231,12 @@ async function openItemDetail(id) {
         <button class="icon-btn" data-action="close">✕</button>
       </div>
       <div class="modal-body">
+        <!-- v1.15.2: Zona unduh di puncak modal (paritas addon v3.24.6) — di bawah
+             header judul/rename, sebelum gambar, gampang dijangkau tanpa scroll -->
+        <div class="viewer-download-row">
+          <button class="btn btn-primary" data-action="download-jpg" ${dataUrl ? '' : 'disabled'}>⬇️ Simpan JPG</button>
+          <button class="btn btn-primary" data-action="download-png" ${dataUrl ? '' : 'disabled'}>⬇️ Simpan PNG</button>
+        </div>
         <div id="viewerImage">${dataUrl ? `<img src="${dataUrl}" style="max-width:100%;border-radius:8px">` : '<div class="empty">Gambar tidak tersedia</div>'}</div>
         <div class="caption-preview" id="viewerCaption">${escapeHtml(cap.textPlain).replace(/\n/g, '<br>')}</div>
       </div>
@@ -224,6 +284,8 @@ async function openItemDetail(id) {
     modal.querySelector('#viewerImage').innerHTML = dataUrl
       ? `<img src="${dataUrl}" style="max-width:100%;border-radius:8px">`
       : '<div class="empty">Gambar tidak tersedia</div>';
+    // v1.15.2: tombol unduh ikut status gambar (disabled bila belum termuat)
+    modal.querySelectorAll('.viewer-download-row .btn').forEach(b => { b.disabled = !dataUrl; });
     modal.querySelector('#viewerCaption').innerHTML = escapeHtml(cap.textPlain).replace(/\n/g, '<br>');
     // Update currentIdx for prev/next
     modal.dataset.currentIdx = newIdx;
@@ -288,6 +350,12 @@ async function openItemDetail(id) {
         showToast(noteVal ? '✓ Catatan disimpan' : '✓ Catatan dihapus');
         refreshList();
       }
+      return;
+    }
+
+    if (action === 'download-jpg' || action === 'download-png') {
+      // v1.15.2: unduh file gambar (JPG/PNG) — dataUrl closure selalu gambar yg sedang tampil
+      await downloadViewerImage(dataUrl, currentItem, action === 'download-jpg' ? 'jpg' : 'png');
       return;
     }
 
