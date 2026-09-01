@@ -181,51 +181,122 @@
 .cyc i.on { background: var(--ember); }
 .bellbtn { font-size: 10.5px; color: #cabfae; text-decoration: underline dotted; text-underline-offset: 3px; }
 
-/* ===== Tape ===== */
-.tapehead { display: flex; align-items: center; justify-content: space-between; padding: 16px 4px 8px; }
-.tapehead h2 { font-family: var(--font-d); font-size: 18px; font-weight: 600; color: #f3ede4; letter-spacing: -0.01em; }
-.gh-dark {
-  width: 34px; height: 34px; border-radius: 11px; background: #251f19;
-  border: 1px solid #373028; color: #cabfae; display: grid; place-items: center;
-}
-.gh-dark svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; }
+/* ===== RecallTape — lembar port floating tape-cs.js (bentuk & warna sama
+   dengan floater addon: body #0E182A, editor #273953, header per warna) ===== */
+.rts-wrap { display: flex; flex-direction: column; gap: 14px; padding: 14px 2px 0; }
 
-.tape-edit { margin: 4px 4px 0; }
-.tape-edit textarea {
-  width: 100%; resize: vertical; min-height: 108px;
-  background: #251f19; border: 1px solid #373028; border-radius: 13px;
-  color: #f3ede4; padding: 11px 13px;
-  font-family: var(--font-d); font-size: 13px; line-height: 1.6;
-  font-variant-numeric: tabular-nums;
+.rts {
+  --p-bd: rgba(245, 158, 11, 0.25);
+  --p-hd: #3A1F00; --p-hd-bd: rgba(245, 158, 11, 0.2);
+  --p-tt: #FCD34D;
+  --p-act: #78350F; --p-act-c: #FCD34D; --p-act-bd: rgba(251, 191, 36, 0.3);
+  position: relative;
+  background: #0E182A; color: #E8EEF7;
+  border: 1px solid var(--p-bd); border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.4);
+  display: flex; flex-direction: column; overflow: hidden;
+  font-size: 13px;
 }
-.tape-edit textarea:focus { outline: none; border-color: #5a4c3a; box-shadow: none; }
-.tape-edit textarea::placeholder { color: #6f6555; }
+.rts[data-color="green"]  { --p-bd: rgba(16,185,129,.25); --p-hd:#0F2E2A; --p-hd-bd:rgba(16,185,129,.2); --p-tt:#6EE7B7; --p-act:#134E4A; --p-act-c:#6EE7B7; --p-act-bd:rgba(110,231,183,.3); }
+.rts[data-color="blue"]   { --p-bd: rgba(59,130,246,.25); --p-hd:#0F2440; --p-hd-bd:rgba(59,130,246,.2); --p-tt:#93C5FD; --p-act:#1E3A8A; --p-act-c:#93C5FD; --p-act-bd:rgba(147,197,253,.3); }
+.rts[data-color="amber"]  { --p-bd: rgba(245,158,11,.25); --p-hd:#3A1F00; --p-hd-bd:rgba(245,158,11,.2); --p-tt:#FCD34D; --p-act:#78350F; --p-act-c:#FCD34D; --p-act-bd:rgba(251,191,36,.3); }
+.rts[data-color="rose"]   { --p-bd: rgba(244,63,94,.25);  --p-hd:#3F0A17; --p-hd-bd:rgba(244,63,94,.2);  --p-tt:#FDA4AF; --p-act:#881337; --p-act-c:#FDA4AF; --p-act-bd:rgba(253,164,175,.3); }
+.rts[data-color="violet"] { --p-bd: rgba(139,92,246,.25); --p-hd:#221040; --p-hd-bd:rgba(139,92,246,.2); --p-tt:#C4B5FD; --p-act:#4C1D95; --p-act-c:#C4B5FD; --p-act-bd:rgba(196,181,253,.3); }
+.rts[data-color="cyan"]   { --p-bd: rgba(6,182,212,.25);  --p-hd:#083344; --p-hd-bd:rgba(6,182,212,.2);  --p-tt:#67E8F9; --p-act:#164E63; --p-act-c:#67E8F9; --p-act-bd:rgba(103,232,249,.3); }
+.rts[data-color="orange"] { --p-bd: rgba(249,115,22,.25); --p-hd:#3B1400; --p-hd-bd:rgba(249,115,22,.2); --p-tt:#FDBA74; --p-act:#7C2D12; --p-act-c:#FDBA74; --p-act-bd:rgba(253,186,116,.3); }
+.rts[data-color="lime"]   { --p-bd: rgba(132,204,22,.25); --p-hd:#1A2E05; --p-hd-bd:rgba(132,204,22,.2); --p-tt:#BEF264; --p-act:#365314; --p-act-c:#BEF264; --p-act-bd:rgba(190,242,100,.3); }
 
-/* Struk hasil — kertas terang di atas layar gelap */
-.receipt {
-  margin: 10px 4px 0; background: #fbf9f4; border-radius: 14px; padding: 14px 16px;
-  font-family: var(--font-d); font-size: 12.5px; color: #3d3427;
-  box-shadow: 0 14px 30px rgba(0, 0, 0, 0.4);
-  min-height: 58px;
+/* Gulung (▾) — hanya header, persis floater .rft-min */
+.rts.rts-min { min-height: 0; }
+.rts.rts-min .rts-editor, .rts.rts-min .rts-status { display: none; }
+
+/* Palet warna */
+.rts-palette {
+  position: absolute; top: 44px; left: 10px; z-index: 6;
+  display: none; flex-wrap: wrap; gap: 7px; max-width: 210px;
+  background: #0E182A; border: 1px solid #22375A; border-radius: 10px; padding: 9px;
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.5);
 }
-.receipt .tl { display: flex; justify-content: space-between; padding: 3px 0; font-variant-numeric: tabular-nums; gap: 10px; }
-.receipt .tl span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.receipt .tl.dim { opacity: 0.45; }
-.receipt .tl.sub { border-top: 1.5px dashed #d9cfae; margin-top: 6px; padding-top: 7px; }
-.receipt .tl.res { border-top: 1.5px dashed #d9cfae; margin-top: 6px; padding-top: 8px; font-weight: 700; font-size: 13.5px; }
-.receipt:empty::before { content: "Tulis baris pertama di atas — hasil hitung muncul di sini."; opacity: 0.5; font-size: 11.5px; }
-
-.tstatus { display: flex; align-items: center; gap: 7px; font-size: 10px; color: #c99b3f; padding: 10px 6px 2px; }
-.tstatus .tdot { width: 7px; height: 7px; min-width: 7px; border-radius: 50%; background: var(--amber); }
-.tstatus.err { color: #ff8d7e; }
-.tstatus.err .tdot { background: #ff8d7e; }
-
-.tacts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 10px 4px 0; }
-.tacts button {
-  display: flex; align-items: center; justify-content: center; gap: 5px;
-  padding: 9px 0; border-radius: 11px; border: 1px solid #373028;
-  color: #e5c887; font-size: 10.5px; font-weight: 700; background: transparent;
+.rts.rts-pal-open { overflow: visible; z-index: 5; }
+.rts.rts-pal-open .rts-palette { display: flex; }
+.rts-swatch {
+  width: 19px; height: 19px; border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.25); cursor: pointer; padding: 0;
+  transition: transform 0.12s;
 }
-.tacts button:active { background: #251f19; }
-.tacts button:disabled { opacity: 0.5; }
-.tacts svg { width: 12px; height: 12px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.rts-swatch:hover { transform: scale(1.18); }
+.rts-swatch.on { border-color: #fff; box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.35); }
+
+/* Header — judul + toolbar ikon (identik floater) */
+.rts-hd {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 10px; flex: none;
+  background: var(--p-hd); border-bottom: 1px solid var(--p-hd-bd);
+}
+.rts-title {
+  font-size: 12px; font-weight: 700; letter-spacing: -0.01em; flex: 1;
+  display: flex; align-items: center; gap: 5px; white-space: nowrap; overflow: hidden;
+  color: var(--p-tt);
+}
+.rts-title svg { width: 14px; height: 14px; flex: none; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.rts-actions { display: flex; gap: 2px; flex: none; }
+.rbtn {
+  width: 27px; height: 26px; border-radius: 6px; border: none; background: none;
+  color: #A3B0C2; cursor: pointer; line-height: 1;
+  display: grid; place-items: center; transition: 0.12s; padding: 0;
+}
+.rbtn:hover { background: rgba(255, 255, 255, 0.08); color: #E8EEF7; }
+.rbtn:active { transform: scale(0.92); }
+.rbtn svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.rbtn.rbtn-flash { background: #42C6A0; color: #fff; }
+.rts-collapse svg { transition: transform 0.15s; }
+.rts.rts-min .rts-collapse svg { transform: rotate(-90deg); }
+
+/* Editor — monospace free typing seperti floater (.rft-editor) */
+.rts-editor {
+  flex: 1; overflow-y: auto; min-height: 200px; max-height: 440px;
+  background: #273953; color: #E8EEF7;
+  font-family: Menlo, Consolas, "Courier New", monospace;
+  font-size: 14px; line-height: 26px;
+  padding: 10px 14px; border: none; outline: none; resize: none;
+  width: 100%; font-variant-numeric: tabular-nums;
+  white-space: pre; overflow-wrap: normal;
+}
+.rts-editor::-webkit-scrollbar { width: 6px; }
+.rts-editor::-webkit-scrollbar-thumb { background: #364C6C; border-radius: 3px; }
+.rts-editor::placeholder { color: #5B7090; white-space: pre-wrap; }
+
+/* Status bar live total (persis floater .rft-status) */
+.rts-status {
+  flex: none; padding: 6px 12px; background: #1A293D;
+  border-top: 1px solid #0F1E33;
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; color: #A3B0C2;
+}
+.rts-autosave { margin-left: auto; }
+
+/* Toast kecil di dalam lembar */
+.rts-toast {
+  position: absolute; bottom: 40px; left: 50%; transform: translateX(-50%) translateY(8px);
+  background: #E8EEF7; color: #0E182A; padding: 5px 12px; border-radius: 6px;
+  font-size: 11px; font-weight: 600; opacity: 0; pointer-events: none; transition: 0.2s;
+  white-space: nowrap; max-width: 90%; z-index: 7;
+}
+.rts-toast.rts-show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* Empty state — semua lembar ditutup (✕) */
+.rts-empty {
+  margin-top: 18px; padding: 34px 18px;
+  border: 1.5px dashed #373028; border-radius: 14px;
+  text-align: center; color: #a89e90;
+}
+.rts-empty-ic { display: grid; place-items: center; width: 44px; height: 44px; margin: 0 auto 10px; border-radius: 13px; background: #251f19; color: #e5c887; }
+.rts-empty-ic svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.rts-empty h3 { font-family: var(--font-d); font-size: 14px; font-weight: 600; color: #f3ede4; }
+.rts-empty p { font-size: 11px; line-height: 1.6; margin-top: 5px; color: #8f8578; }
+.rts-empty-new {
+  margin-top: 14px; display: inline-flex; align-items: center; gap: 6px;
+  padding: 9px 18px; border-radius: 99px; border: 1px solid var(--amber);
+  color: var(--amber); font-size: 11.5px; font-weight: 700; background: transparent;
+}
+.rts-empty-new svg { width: 12px; height: 12px; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; }

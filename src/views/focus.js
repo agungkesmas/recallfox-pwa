@@ -1,16 +1,17 @@
 // src/views/focus.js — Tab Fokus: Pomodoro timer + RecallTape
 // v1.14.0 (Concept v3): alat harian paling sering dipakai naik jadi tab sendiri.
+// v1.15.0: RecallTape diganti lembar port SETIA dari floating RecallTape addon
+// (content/tape-cs.js) — Enter = hitung otomatis di editor, header toolbar,
+// multi-lembar + warna, footer "Tersimpan otomatis · Total". Lihat views/tape.js.
 // Logika Pomodoro di-port setia dari addon lib/pomodoro.js (preset 25/5, 50/10,
 // 52/17, 90/20; long break 15m tiap 4 siklus; state sticky).
-// Logika Tape di-port setia dari addon lib/tape.js (parser ala CalcTape).
 // LOCAL-FIRST: state disimpan di localStorage. TANPA schema Supabase, tanpa sync
 // — sama seperti addon (alat ini memang per-device di addon).
 //
 // Non-disruptif: view ini TIDAK ikut di-re-render realtime/polling (main.js),
 // jadi timer tidak pernah ter-reset oleh sinkronisasi vault/notes.
 
-import { evaluate, formatNumber, toPlainText, toMarkdown, loadSession, saveSession } from '../lib/tape.js';
-import { createFileItem } from '../sync.js';
+import { renderTapeSheets } from './tape.js';
 
 // ============================================================
 // Pomodoro — port dari addon lib/pomodoro.js
@@ -229,15 +230,9 @@ function updatePomoDom() {
 const IC = {
   timer: '<svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="7.5"/><path d="M12 10v3.5l2.5 1.5"/><path d="M9.5 2.5h5"/></svg>',
   tape: '<svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2.5"/><path d="M8 8h8M8 12h8M8 16h4"/></svg>',
-  copy: '<svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>',
-  save: '<svg viewBox="0 0 24 24"><path d="M5 3h11l3 3v13a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z"/><path d="M8 3v5h7V3"/></svg>',
-  spark: '<svg viewBox="0 0 24 24"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3Z"/></svg>',
-  clear: '<svg viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>',
   reset: '<svg viewBox="0 0 24 24"><path d="M4 10a8 8 0 1 1 2 6"/><path d="M4 5v5h5"/></svg>',
   skip: '<svg viewBox="0 0 24 24"><path d="M9 5v14M17 6l-8 6 8 6"/></svg>'
 };
-
-const SAMPLE_TAPE = '250000 Gaji utama\n+ 2,5jt Bonus projek\n- 150rb Belanja mingguan\n= Subtotal\n+ 11% PPN\n/ 2 Bagi 2 orang';
 
 let _segMode = 'timer'; // preferensi segmen terakhir
 
@@ -303,25 +298,9 @@ export function renderFocus(user, onRefresh) {
         </div>
       </div>
 
-      <!-- ===== SEGMENT: TAPE ===== -->
+      <!-- ===== SEGMENT: TAPE — lembar port floating RecallTape (views/tape.js) ===== -->
       <div id="segTape" style="display:${_segMode === 'tape' ? '' : 'none'}">
-        <div class="tapehead">
-          <h2>RecallTape</h2>
-          <button class="gh-dark" id="tapeNew" title="Pita baru (bersihkan)">${IC.clear}</button>
-        </div>
-        <div class="tape-edit">
-          <textarea id="tapeInput" rows="6" spellcheck="false"
-            placeholder="250000 Gaji utama&#10;+ 50k Bonus projek&#10;- 20rb Makan siang&#10;= Subtotal&#10;* 2 Pajak 2x"></textarea>
-        </div>
-        <div class="receipt" id="tapeReceipt"></div>
-        <div class="tstatus" id="tapeStatus"><span class="tdot"></span><span id="tapeStatusTx">auto-format ala CalcTape — 50k / 2,5jt / +19% jalan semua</span></div>
-        <div class="tacts">
-          <button id="tapeCopy">${IC.copy}Copy</button>
-          <button id="tapeSave">${IC.save}Vault</button>
-          <button id="tapeSample">${IC.spark}Contoh</button>
-          <button id="tapeClear">${IC.clear}Bersih</button>
-        </div>
-        <div class="tstatus" style="opacity:.55"><span class="tdot"></span>local-first · tersimpan otomatis di perangkat ini</div>
+        <div class="rts-wrap" id="tapeSheets"></div>
       </div>
     </div>
   `;
@@ -408,101 +387,8 @@ export function renderFocus(user, onRefresh) {
     });
   }
 
-  // ---------- tape ----------
-  const tapeInput = document.getElementById('tapeInput');
-  const receipt = document.getElementById('tapeReceipt');
-  const statusTx = document.getElementById('tapeStatusTx');
-  const statusWrap = document.getElementById('tapeStatus');
-  tapeInput.value = loadSession();
-
-  function renderTape() {
-    const text = tapeInput.value;
-    saveSession(text);
-    const tape = evaluate(text);
-    const rows = [];
-    for (const e of tape.entries) {
-      if (e.kind === 'comment') {
-        rows.push('<div class="tl dim"><span>' + esc(e.note) + '</span><span></span></div>');
-      } else if (e.kind === 'note') {
-        rows.push('<div class="tl dim"><span>' + esc(e.note) + '</span><span></span></div>');
-      } else if (e.kind === 'subtotal') {
-        rows.push('<div class="tl sub"><span>= ' + esc(e.note || 'Subtotal') + '</span><span>' + formatNumber(e.display) + '</span></div>');
-      } else {
-        const sym = { '+': '+', '-': '−', '*': '×', '/': '÷' }[e.op] || '+';
-        const amt = formatNumber(e.amount) + (e.isPercent ? '%' : '');
-        const label = (e.note ? sym + ' ' + amt + ' ' + e.note : sym + ' ' + amt);
-        rows.push('<div class="tl"><span>' + esc(label) + '</span><span>' + formatNumber(e.display) + '</span></div>');
-      }
-    }
-    rows.push('<div class="tl res"><span>HASIL</span><span>' + formatNumber(tape.grandTotal) + '</span></div>');
-    receipt.innerHTML = rows.join('');
-    if (tape.error) {
-      statusTx.textContent = tape.error;
-      statusWrap.classList.add('err');
-    } else {
-      const nLines = tape.entries.filter(e => e.kind === 'op').length;
-      statusTx.textContent = nLines
-        ? ('auto-format ala CalcTape · ' + nLines + ' baris terhitung')
-        : 'auto-format ala CalcTape — 50k / 2,5jt / +19% jalan semua';
-      statusWrap.classList.remove('err');
-    }
-  }
-
-  let _tapeDeb = null;
-  tapeInput.addEventListener('input', () => {
-    clearTimeout(_tapeDeb);
-    _tapeDeb = setTimeout(renderTape, 180);
-  });
-  renderTape();
-
-  document.getElementById('tapeCopy').addEventListener('click', async () => {
-    const text = toPlainText(evaluate(tapeInput.value));
-    try {
-      await navigator.clipboard.writeText(text);
-      statusTx.textContent = 'Pita disalin ke clipboard ✓';
-    } catch (e) {
-      statusTx.textContent = 'Gagal menyalin: ' + e.message;
-    }
-  });
-  document.getElementById('tapeSave').addEventListener('click', async () => {
-    if (!tapeInput.value.trim()) { statusTx.textContent = 'Pita masih kosong'; return; }
-    const tape = evaluate(tapeInput.value);
-    const btn = document.getElementById('tapeSave');
-    btn.disabled = true;
-    try {
-      const d = new Date();
-      const stamp = d.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }) + ' ' +
-        d.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' });
-      const result = await createFileItem(user, {
-        title: 'Pita ' + stamp,
-        body: toMarkdown(tape, { title: 'RecallTape ' + stamp }),
-        tags: ['tape', 'md'],
-        source: { kind: 'md', mime: 'text/markdown', fileName: 'pita-' + Date.now() + '.md', size: 0, uploadedFrom: 'pwa-tape', capturedAt: new Date().toISOString() }
-      });
-      if (result.ok) statusTx.textContent = 'Tersimpan ke Vault ✓ (tag: tape)';
-      else statusTx.textContent = 'Gagal simpan: ' + (result.error || 'unknown');
-    } catch (e) {
-      statusTx.textContent = 'Gagal simpan: ' + e.message;
-    }
-    btn.disabled = false;
-  });
-  document.getElementById('tapeSample').addEventListener('click', () => {
-    tapeInput.value = SAMPLE_TAPE;
-    renderTape();
-  });
-  document.getElementById('tapeNew').addEventListener('click', confirmNewTape);
-  document.getElementById('tapeClear').addEventListener('click', confirmNewTape);
-  function confirmNewTape() {
-    if (tapeInput.value.trim() && !confirm('Bersihkan pita? Teks saat ini akan hilang (sudah tersimpan? salin dulu).')) return;
-    tapeInput.value = '';
-    renderTape();
-  }
+  // ---------- tape — lembar port floating RecallTape (views/tape.js) ----------
+  renderTapeSheets(document.getElementById('tapeSheets'), user);
 
   updatePomoDom();
-}
-
-function esc(s) {
-  return String(s == null ? '' : s)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }
