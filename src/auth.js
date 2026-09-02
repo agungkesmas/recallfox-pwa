@@ -193,6 +193,54 @@ export async function changePassword(currentPassword, newPassword, email) {
 }
 
 // ===========================================================================
+// v1.16.0: Password untuk user OAuth/Google (belum punya password)
+// ===========================================================================
+
+/**
+ * Deteksi apakah user sudah punya kredensial email+password.
+ * User yang daftar/login via tombol Google hanya punya identity provider
+ * 'google' — mereka TIDAK punya password, sehingga form "Ubah Password"
+ * (yang memverifikasi password lama via signInWithPassword) selalu gagal
+ * dengan "Password lama salah". Untuk mereka, sediakan "Buat Password".
+ *
+ * @param {object} user - Supabase user (session.user)
+ * @returns {boolean} true bila user punya identity 'email' (password)
+ */
+export function userHasPassword(user) {
+  try {
+    if (user && Array.isArray(user.identities)) {
+      return user.identities.some(i => i && i.provider === 'email');
+    }
+  } catch (e) {}
+  // Fallback aman: bila data identities tak tersedia, anggap punya password
+  // (jalur verifikasi password lama) supaya tidak membuka aksi tanpa verifikasi.
+  return true;
+}
+
+/**
+ * Buat password PERTAMA untuk user yang login via OAuth/Google.
+ * Tidak ada verifikasi password lama (memang belum ada) — Supabase
+ * `updateUser({ password })` berlaku untuk session aktif. Setelah sukses,
+ * identity 'email' terbentuk dan user bisa login dengan email + password
+ * tanpa Google.
+ *
+ * @param {string} newPassword - Password baru (divalidasi standar)
+ * @param {string} email - Email user (untuk validasi kemiripan)
+ * @returns {Promise<{ok: boolean, error?: string, user?: object}>}
+ */
+export async function createPasswordForOAuthUser(newPassword, email) {
+  const validation = validatePassword(newPassword, email);
+  if (!validation.ok) return validation;
+  const { data, error } = await supabase.auth.updateUser({
+    password: newPassword
+  });
+  if (error) {
+    return { ok: false, error: error.message };
+  }
+  return { ok: true, user: data.user };
+}
+
+// ===========================================================================
 // Password strength validation
 // ===========================================================================
 

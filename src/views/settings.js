@@ -4,7 +4,7 @@
 //         (lihat __APP_VERSION__ define). Tidak perlu update manual setiap release.
 // v1.11.4: Tambah "Change Password" section dengan verifikasi password lama
 
-import { signOut, changePassword, getPasswordStrength } from '../auth.js';
+import { signOut, changePassword, getPasswordStrength, userHasPassword, createPasswordForOAuthUser } from '../auth.js';
 import { processSyncQueue } from '../sync.js';
 import { dbGetSyncQueue, dbGetAllVaultItems, dbGetAllNotes } from '../db.js';
 
@@ -25,6 +25,54 @@ export async function renderSettings(user, onLogout) {
     const t = item.type || 'unknown';
     typeStats[t] = (typeStats[t] || 0) + 1;
   }
+
+  // v1.16.0: User login Google (tanpa identity 'email') belum punya password —
+  // form "Ubah Password" (verifikasi password lama) selalu gagal untuk mereka.
+  // Tampilkan form "Buat Password" tanpa field password lama sebagai gantinya.
+  const hasPw = userHasPassword(user);
+
+  const pwFormHtml = hasPw ? `
+      <p style="font-size:13px;color:var(--text-muted);margin:0 0 12px">
+        Ubah password akun kamu. Demi keamanan, password lama akan diverifikasi dulu.
+      </p>
+      <form id="changePwForm" class="settings-form">
+        <div class="password-field">
+          <input type="password" id="currentPw" placeholder="Password lama" required autocomplete="current-password">
+          <button type="button" class="toggle-pw" data-target="currentPw" title="Tampilkan">👁️</button>
+        </div>
+        <div class="password-field">
+          <input type="password" id="newPw" placeholder="Password baru (min 8 karakter)" required autocomplete="new-password" minlength="8">
+          <button type="button" class="toggle-pw" data-target="newPw" title="Tampilkan">👁️</button>
+        </div>
+        <div class="pw-strength" id="pwStrength">
+          <div class="pw-strength-bar"><div class="pw-strength-fill" style="width:0%"></div></div>
+          <span class="pw-strength-label">Kosong</span>
+        </div>
+        <div class="password-field">
+          <input type="password" id="confirmPw" placeholder="Ulangi password baru" required autocomplete="new-password">
+          <button type="button" class="toggle-pw" data-target="confirmPw" title="Tampilkan">👁️</button>
+        </div>
+        <button type="submit" class="btn btn-primary" id="changePwBtn">Ubah Password</button>
+      </form>` : `
+      <p style="font-size:13px;color:var(--text-muted);margin:0 0 12px">
+        Akun kamu login via <strong>Google</strong> dan belum punya password. Buat password
+        supaya bisa juga login pakai email + password (tanpa Google).
+      </p>
+      <form id="changePwForm" class="settings-form">
+        <div class="password-field">
+          <input type="password" id="newPw" placeholder="Password baru (min 8 karakter)" required autocomplete="new-password" minlength="8">
+          <button type="button" class="toggle-pw" data-target="newPw" title="Tampilkan">👁️</button>
+        </div>
+        <div class="pw-strength" id="pwStrength">
+          <div class="pw-strength-bar"><div class="pw-strength-fill" style="width:0%"></div></div>
+          <span class="pw-strength-label">Kosong</span>
+        </div>
+        <div class="password-field">
+          <input type="password" id="confirmPw" placeholder="Ulangi password baru" required autocomplete="new-password">
+          <button type="button" class="toggle-pw" data-target="confirmPw" title="Tampilkan">👁️</button>
+        </div>
+        <button type="submit" class="btn btn-primary" id="changePwBtn">Buat Password</button>
+      </form>`;
 
   main.innerHTML = `
     <div class="view-header">
@@ -54,29 +102,8 @@ export async function renderSettings(user, onLogout) {
     </div>
 
     <div class="settings-card">
-      <h3>🔐 Keamanan</h3>
-      <p style="font-size:13px;color:var(--text-muted);margin:0 0 12px">
-        Ubah password akun kamu. Demi keamanan, password lama akan diverifikasi dulu.
-      </p>
-      <form id="changePwForm" class="settings-form">
-        <div class="password-field">
-          <input type="password" id="currentPw" placeholder="Password lama" required autocomplete="current-password">
-          <button type="button" class="toggle-pw" data-target="currentPw" title="Tampilkan">👁️</button>
-        </div>
-        <div class="password-field">
-          <input type="password" id="newPw" placeholder="Password baru (min 8 karakter)" required autocomplete="new-password" minlength="8">
-          <button type="button" class="toggle-pw" data-target="newPw" title="Tampilkan">👁️</button>
-        </div>
-        <div class="pw-strength" id="pwStrength">
-          <div class="pw-strength-bar"><div class="pw-strength-fill" style="width:0%"></div></div>
-          <span class="pw-strength-label">Kosong</span>
-        </div>
-        <div class="password-field">
-          <input type="password" id="confirmPw" placeholder="Ulangi password baru" required autocomplete="new-password">
-          <button type="button" class="toggle-pw" data-target="confirmPw" title="Tampilkan">👁️</button>
-        </div>
-        <button type="submit" class="btn btn-primary" id="changePwBtn">Ubah Password</button>
-      </form>
+      <h3>🔐 ${hasPw ? 'Ubah Password' : 'Buat Password'}</h3>
+      ${pwFormHtml}
       <div id="changePwMsg" class="login-error"></div>
     </div>
 
@@ -128,8 +155,8 @@ export async function renderSettings(user, onLogout) {
     renderSettings(user, onLogout);
   });
 
-  // v1.11.4: Change Password handlers
-  wireChangePassword(user);
+  // v1.11.4: Change Password handlers (v1.16.0: + mode Buat Password utk user Google)
+  wireChangePassword(user, hasPw);
 
   // v1.11.4: Toggle password visibility (reusable)
   document.querySelectorAll('.toggle-pw[data-target]').forEach(btn => {
@@ -144,7 +171,9 @@ export async function renderSettings(user, onLogout) {
 }
 
 // v1.11.4: Wire change password form
-function wireChangePassword(user) {
+// v1.16.0: hasPw=false (user Google) → mode Buat Password tanpa verifikasi
+// password lama; sukses TIDAK memaksa logout (session Google tetap valid).
+function wireChangePassword(user, hasPw) {
   const form = document.getElementById('changePwForm');
   const msg = document.getElementById('changePwMsg');
   const newPwInput = document.getElementById('newPw');
@@ -168,7 +197,6 @@ function wireChangePassword(user) {
     msg.textContent = '';
     msg.style.color = '';
 
-    const currentPw = document.getElementById('currentPw').value;
     const newPw = newPwInput.value;
     const confirmPw = confirmInput.value;
 
@@ -178,26 +206,34 @@ function wireChangePassword(user) {
     }
 
     btn.disabled = true;
-    btn.textContent = '⏳ Memverifikasi...';
-    msg.textContent = '⏳ Memverifikasi password lama & memperbarui...';
+    btn.textContent = hasPw ? '⏳ Memverifikasi...' : '⏳ Membuat...';
+    msg.textContent = hasPw ? '⏳ Memverifikasi password lama & memperbarui...'
+                            : '⏳ Membuat password akun...';
     msg.style.color = 'var(--text-muted, #6b7280)';
 
-    const res = await changePassword(currentPw, newPw, user.email);
+    const res = hasPw
+      ? await changePassword(document.getElementById('currentPw').value, newPw, user.email)
+      : await createPasswordForOAuthUser(newPw, user.email);
 
     btn.disabled = false;
-    btn.textContent = 'Ubah Password';
+    btn.textContent = hasPw ? 'Ubah Password' : 'Buat Password';
 
     if (res.ok) {
-      msg.innerHTML = '✓ <strong>Password berhasil diubah.</strong> Silakan login lagi dengan password baru.';
-      msg.style.color = '#16a34a';
       form.reset();
       strengthBar.style.width = '0%';
       strengthLabel.textContent = 'Kosong';
-      // Auto logout setelah 3 detik supaya user re-login dengan password baru
-      setTimeout(async () => {
-        await signOut();
-        onLogoutCompat();
-      }, 3000);
+      if (hasPw) {
+        msg.innerHTML = '✓ <strong>Password berhasil diubah.</strong> Silakan login lagi dengan password baru.';
+        msg.style.color = '#16a34a';
+        // Auto logout setelah 3 detik supaya user re-login dengan password baru
+        setTimeout(async () => {
+          await signOut();
+          onLogoutCompat();
+        }, 3000);
+      } else {
+        msg.innerHTML = '✓ <strong>Password berhasil dibuat.</strong> Sekarang kamu juga bisa login pakai email + password. Kamu tetap login di perangkat ini.';
+        msg.style.color = '#16a34a';
+      }
     } else {
       msg.textContent = '❌ ' + res.error;
       msg.style.color = '#dc2626';

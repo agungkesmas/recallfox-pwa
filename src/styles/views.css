@@ -230,6 +230,19 @@
 .nbody-edit tr:nth-child(even) td { background: rgba(0,0,0,0.02); }
 .nbody-edit b, .nbody-edit strong { font-weight: 700; }
 .nbody-edit i, .nbody-edit em { font-style: italic; }
+
+/* ===== v1.16.0: Task bullet (port RecallNote addon notes-cs.js) =====
+   Radio = ::before pseudo (NOL elemen non-editable di alur teks — caret &
+   delete selalu native), paritas addon v3.24.2; palet light-theme addon. */
+.nbody-edit div.rfn-task { position: relative; padding-left: 25px; min-height: 1.5em; }
+.nbody-edit div.rfn-task::before {
+  content: ''; position: absolute; left: 4px; top: 0.3em;
+  width: 13px; height: 13px; border: 2px solid #64748b; border-radius: 50%;
+  box-sizing: border-box; transition: transform 0.12s;
+}
+.nbody-edit div.rfn-task:hover::before { transform: scale(1.15); }
+.nbody-edit div.rfn-done::before { background: #10b981; border-color: #10b981; }
+.nbody-edit div.rfn-done { text-decoration: line-through; opacity: 0.55; }
 .nbody-edit u { text-decoration: underline; }
 .nbody-edit s, .nbody-edit strike { text-decoration: line-through; }
 .nbody-edit ul, .nbody-edit ol { margin: 6px 0 6px 22px; padding: 0; }
