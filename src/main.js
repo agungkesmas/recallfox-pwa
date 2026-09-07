@@ -12,6 +12,7 @@ import './styles/base.css';
 import './styles/components.css';
 import './styles/views.css';
 import './styles/v3.css';  // v1.14.0: Concept v3 — dock melayang, hairline, Fokus (paling akhir = override)
+import './styles/sticky.css';  // v1.17.0: strip sticky Waktu Shalat & Puasa (paling akhir)
 
 import { getSession, onAuthChange, handleOAuthCallback } from './auth.js';
 import { pullFromCloud, subscribeRealtime, unsubscribeRealtime, processSyncQueue, createFileItem } from './sync.js';
@@ -22,6 +23,7 @@ import { renderSettings } from './views/settings.js';
 import { renderVault, isUserTogglingFolders, handleCreateFolder } from './views/vault.js';
 import { renderFocus } from './views/focus.js';  // v1.14.0: Tab Fokus (Pomodoro + RecallTape, local-first)
 import { showSharePreviewModal } from './share-target.js';  // v1.9.0
+import { mountStickyStrip } from './components/sticky-strip.js';  // v1.17.0: strip sticky Waktu Shalat & Puasa
 
 // v1.14.0: default view 'notes' (Concept v3 — alat harian paling sering dipakai
 // dibuka duluan; media/vault tetap satu tap via dock).
@@ -296,6 +298,11 @@ function renderShell(user) {
     navigateTo(btn.dataset.view);
   });
   document.getElementById('fabAdd').addEventListener('click', openFabMenu);
+
+  // v1.17.0: Strip sticky Waktu Shalat & Puasa — dirender SEKALI di shell
+  // (di luar #appMain) supaya terlihat di SEMUA halaman tanpa ikut re-render
+  // navigasi. Model sticky ala popup addon (bar ringkas + detail expandable).
+  mountStickyStrip();
 }
 
 function openFabMenu() {

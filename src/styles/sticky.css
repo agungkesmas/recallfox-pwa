@@ -1,0 +1,152 @@
+/* src/styles/sticky.css — Strip sticky Waktu Shalat & Puasa (v1.17.0)
+   Model sticky ala popup addon: bar ringkas selalu terlihat di semua halaman,
+   fixed TOP, di luar #appMain (tidak ikut ter-replace navigasi).
+   Muat SETELAH v3.css (import di main.js) — ikuti bahasa visual Concept v3:
+   permukaan frosted, hairline 1px, aksen iris. */
+
+.rf-sticky {
+  position: fixed;
+  top: calc(var(--safe-top, 0px) + 10px);
+  left: 12px; right: 12px;
+  max-width: 696px;
+  margin: 0 auto;
+  z-index: 55;               /* di atas bottom-nav (50), di bawah FAB (60) & sheet (100) */
+}
+
+/* Konten view digeser ke bawah supaya tidak tertutup strip */
+.app-shell.has-sticky .app-main { padding-top: 68px; }
+
+.rf-sticky-bar {
+  display: flex; align-items: center; gap: 8px;
+  width: 100%;
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(231, 227, 218, 0.9);
+  border-radius: 16px;
+  padding: 10px 13px;
+  font-size: 12px; color: var(--text-muted);
+  cursor: pointer; text-align: left;
+  box-shadow: 0 10px 26px rgba(25, 23, 20, 0.10);
+  transition: border-color 0.15s;
+}
+.rf-sticky-bar:active { border-color: var(--primary); }
+
+.rf-sticky-cell {
+  display: flex; align-items: center; gap: 6px;
+  white-space: nowrap; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.rf-sticky-cell b { color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
+.rf-sticky-cell .rf-setup-sub {
+  font-size: 10.5px; color: var(--text-subtle, #a49d8f);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* Warna countdown: >10 menit hijau, <10 amber, ≤2 menit merah (ala addon) */
+.rf-cd { font-weight: 700; font-variant-numeric: tabular-nums; }
+.rf-cd.ok   { color: var(--success, #16a34a); }
+.rf-cd.soon { color: var(--warning, #d97706); }
+.rf-cd.now  { color: var(--danger, #dc2626); }
+
+.rf-sticky-sep { width: 1px; height: 14px; background: var(--border); flex: none; }
+
+/* Layar sempit: sel puasa disembunyikan dulu (ala .popup.w-sm addon) */
+@media (max-width: 420px) {
+  .rf-sticky-cell.fast { display: none; }
+  .rf-sticky-bar .rf-sticky-sep { display: none; }
+}
+
+.rf-sticky-chev {
+  margin-left: auto; color: #a49d8f;
+  transition: transform 0.2s; flex: none;
+}
+.rf-sticky.open .rf-sticky-chev { transform: rotate(180deg); }
+
+/* Chip setup: tombol ✕ dismiss */
+.rf-sticky-dismiss {
+  margin-left: auto; flex: none;
+  width: 22px; height: 22px; border-radius: 50%;
+  border: none; background: var(--bg); color: #a49d8f;
+  font-size: 11px; line-height: 1; cursor: pointer;
+}
+.rf-sticky-dismiss:active { background: var(--iris-tint, #f1ecfe); color: var(--primary); }
+
+/* Panel detail (expand) */
+.rf-sticky-detail {
+  max-height: 0; overflow: hidden;
+  transition: max-height 0.25s ease, margin 0.25s ease;
+}
+.rf-sticky.open .rf-sticky-detail { max-height: 460px; margin-top: 8px; }
+
+.rf-sticky-detail-in {
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(231, 227, 218, 0.9);
+  border-radius: 16px;
+  padding: 12px 13px;
+  font-size: 12px;
+  box-shadow: 0 10px 26px rgba(25, 23, 20, 0.10);
+}
+
+.rf-detail-head {
+  display: flex; justify-content: space-between; gap: 8px;
+  align-items: baseline; flex-wrap: wrap;
+}
+.rf-detail-loc {
+  font-size: 10.5px; font-weight: 700;
+  color: var(--success, #16a34a);
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.rf-detail-hijri { font-size: 10.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+
+/* Grid waktu shalat — 3 kolom (ala .pray-grid addon, token v3 PWA) */
+.rf-pray-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 9px 0; }
+.rf-pray-cell {
+  background: var(--bg); border-radius: 10px;
+  padding: 6px 4px; text-align: center; min-width: 0;
+}
+.rf-pray-cell .n { font-size: 10px; color: var(--text-muted); white-space: nowrap; }
+.rf-pray-cell .t { font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.rf-pray-cell.next { background: var(--iris-tint, #f1ecfe); outline: 1.5px solid var(--primary); }
+.rf-pray-cell.next .n, .rf-pray-cell.next .t { color: var(--primary); }
+
+/* Baris puasa sunnah berikutnya + chips jadwal 14 hari */
+.rf-fast-line { font-size: 11.5px; color: var(--text-muted); line-height: 1.5; padding: 2px 0 6px; }
+.rf-fast-line b { color: var(--text); }
+.rf-fast-chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 9px; }
+.rf-fast-chip {
+  font-size: 10.5px;
+  background: var(--bg); border: 1px solid var(--border);
+  border-radius: 999px; padding: 3px 9px;
+  color: var(--text-muted); white-space: nowrap;
+}
+.rf-fast-chip.soon { border-color: var(--primary); color: var(--primary); font-weight: 600; }
+
+.rf-detail-settings {
+  width: 100%; padding: 8px 0;
+  border-radius: 10px; border: none; cursor: pointer;
+  background: var(--iris-tint, #f1ecfe); color: var(--primary);
+  font-weight: 700; font-size: 12px;
+}
+
+/* ===== Kartu pengaturan shalat (settings view) ===== */
+.prayer-actions { display: flex; gap: 8px; margin: 10px 0 4px; flex-wrap: wrap; }
+.prayer-actions .btn { flex: 1; min-width: 130px; }
+.prayer-search { display: flex; gap: 8px; margin: 8px 0 4px; }
+.prayer-search input {
+  flex: 1; min-width: 0;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px;
+  font-size: 14px; background: var(--surface); color: var(--text);
+}
+.prayer-search input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--iris-tint, #f1ecfe); }
+.prayer-status {
+  font-size: 11.5px; color: var(--text-muted); line-height: 1.55;
+  margin-top: 8px; word-break: break-word;
+}
+.prayer-status b { color: var(--text); }
+.prayer-status .err { color: var(--danger, #dc2626); }
+.prayer-status .okc { color: var(--success, #16a34a); }
+.prayer-format-select {
+  padding: 7px 10px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface); color: var(--text); font-size: 13px;
+}

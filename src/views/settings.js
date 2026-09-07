@@ -7,6 +7,9 @@
 import { signOut, changePassword, getPasswordStrength, userHasPassword, createPasswordForOAuthUser } from '../auth.js';
 import { processSyncQueue } from '../sync.js';
 import { dbGetSyncQueue, dbGetAllVaultItems, dbGetAllNotes } from '../db.js';
+// v1.17.0: Waktu Shalat & Puasa — kartu pengaturan untuk strip sticky
+import { loadPrayerSettings, savePrayerSettings, ensurePrayerTimes, buildStripModel, dayAheadLabel } from '../lib/prayer.js';
+import { reverseGeocode, geocode, formatCountdown, to12Hour } from '../lib/salahtime.js';
 
 export async function renderSettings(user, onLogout) {
   const main = document.getElementById('appMain');
@@ -107,6 +110,8 @@ export async function renderSettings(user, onLogout) {
       <div id="changePwMsg" class="login-error"></div>
     </div>
 
+    ${prayerCardHtml()}
+
     <div class="settings-card">
       <h3>📊 Statistik Vault</h3>
       <div class="setting-row">
@@ -157,6 +162,20 @@ export async function renderSettings(user, onLogout) {
 
   // v1.11.4: Change Password handlers (v1.16.0: + mode Buat Password utk user Google)
   wireChangePassword(user, hasPw);
+
+  // v1.17.0: Waktu Shalat & Puasa — wire kartu pengaturan
+  wirePrayerCard();
+
+  // v1.17.0: Strip sticky minta scroll ke kartu ini (tap "Atur" dari strip)
+  try {
+    if (sessionStorage.getItem('rf_scroll_to_prayer_card') === '1') {
+      sessionStorage.removeItem('rf_scroll_to_prayer_card');
+      setTimeout(() => {
+        const card = document.getElementById('prayerCard');
+        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 120);
+    }
+  } catch (e) {}
 
   // v1.11.4: Toggle password visibility (reusable)
   document.querySelectorAll('.toggle-pw[data-target]').forEach(btn => {
@@ -246,6 +265,163 @@ function onLogoutCompat() {
   // Re-read main and trigger navigation by clearing hash
   window.location.hash = '#/login';
   window.location.reload();
+}
+
+// ============ v1.17.0: Waktu Shalat & Puasa (kartu pengaturan) ============
+// Settings disimpan di localStorage (rf_prayer_settings_v1) — pola konsisten
+// PWA (rf_* per-device, sama seperti fokus/notes). savePrayerSettings otomatis
+// memicu event 'rf-prayer-updated' → strip sticky refresh sendiri.
+
+function prayerCardHtml() {
+  const s = loadPrayerSettings();
+  const locName = s.location || (typeof s.lat === 'number' ? s.lat.toFixed(3) + ', ' + s.lng.toFixed(3) : 'belum diatur');
+  return `
+    <div class="settings-card" id="prayerCard">
+      <h3>🕌 Waktu Shalat &amp; Puasa</h3>
+      <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">
+        Jadwal shalat metode Muhammadiyah (Aladhan API) + jadwal puasa sunnah
+        (Senin-Kamis, Ayyamul Bidh, Asyura, Arafah, dll) — tampil sebagai
+        <strong>strip sticky</strong> di semua halaman, ala addon.
+      </p>
+      <div class="setting-row">
+        <span>Strip sticky</span>
+        <button class="btn ${s.enabled ? 'btn-danger' : 'btn-primary'}" id="prayerToggle">${s.enabled ? 'Nonaktifkan' : 'Aktifkan'}</button>
+      </div>
+      <div class="setting-row">
+        <span>Lokasi</span>
+        <strong id="prayerLocName">${escapeHtml(locName)}</strong>
+      </div>
+      <div class="prayer-actions">
+        <button class="btn btn-secondary" id="prayerGps">📍 Pakai Lokasi GPS</button>
+      </div>
+      <div class="prayer-search">
+        <input id="prayerCity" placeholder="Cari kota (mis. Yogyakarta)" autocomplete="off">
+        <button class="btn btn-primary" id="prayerSearchBtn">Cari</button>
+      </div>
+      <div class="setting-row">
+        <span>Format waktu</span>
+        <select class="prayer-format-select" id="prayerFormat">
+          <option value="24h" ${s.timeFormat !== '12h' ? 'selected' : ''}>24 jam</option>
+          <option value="12h" ${s.timeFormat === '12h' ? 'selected' : ''}>12 jam (AM/PM)</option>
+        </select>
+      </div>
+      <div class="prayer-status" id="prayerStatus">…</div>
+    </div>`;
+}
+
+function wirePrayerCard() {
+  const toggleBtn = document.getElementById('prayerToggle');
+  const gpsBtn = document.getElementById('prayerGps');
+  const searchBtn = document.getElementById('prayerSearchBtn');
+  const formatSel = document.getElementById('prayerFormat');
+  if (!toggleBtn) return;
+
+  renderPrayerStatus();
+
+  toggleBtn.addEventListener('click', () => {
+    const s = loadPrayerSettings();
+    s.enabled = !s.enabled;
+    savePrayerSettings(s);
+    toggleBtn.textContent = s.enabled ? 'Nonaktifkan' : 'Aktifkan';
+    toggleBtn.className = 'btn ' + (s.enabled ? 'btn-danger' : 'btn-primary');
+    renderPrayerStatus();
+  });
+
+  gpsBtn.addEventListener('click', () => {
+    if (!navigator.geolocation) {
+      setPrayerStatus('<span class="err">❌ Perangkat tidak mendukung geolokasi — pakai pencarian kota.</span>');
+      return;
+    }
+    setPrayerStatus('⏳ Mengambil lokasi GPS…');
+    navigator.geolocation.getCurrentPosition(async (pos) => {
+      try {
+        const lat = pos.coords.latitude, lng = pos.coords.longitude;
+        setPrayerStatus('⏳ Menerjemahkan koordinat ke nama kota…');
+        const display = await reverseGeocode(lat, lng);
+        const s = loadPrayerSettings();
+        s.enabled = true; s.lat = lat; s.lng = lng;
+        s.location = display || ('Lat ' + lat.toFixed(3) + ', Lng ' + lng.toFixed(3));
+        savePrayerSettings(s);
+        document.getElementById('prayerLocName').textContent = s.location;
+        await refreshPrayerStatusAfterFetch();
+      } catch (e) {
+        setPrayerStatus('<span class="err">❌ ' + escapeHtml(e.message || 'gagal memuat jadwal') + '</span>');
+      }
+    }, (err) => {
+      setPrayerStatus('<span class="err">❌ GPS gagal (' + escapeHtml(err.message) + ') — izinkan akses lokasi atau cari kota manual.</span>');
+    }, { enableHighAccuracy: false, timeout: 12000, maximumAge: 600000 });
+  });
+
+  const doSearch = async () => {
+    const q = (document.getElementById('prayerCity')?.value || '').trim();
+    if (q.length < 3) { setPrayerStatus('<span class="err">❌ Ketik nama kota minimal 3 huruf.</span>'); return; }
+    setPrayerStatus('⏳ Mencari "' + escapeHtml(q) + '"…');
+    try {
+      const g = await geocode(q);
+      const s = loadPrayerSettings();
+      s.enabled = true; s.lat = g.lat; s.lng = g.lng;
+      // ambil nama ringkas: 2 bagian pertama, tiap bagian di-trim
+      s.location = (g.display || '').split(',').slice(0, 2).map(x => x.trim()).filter(Boolean).join(', ') || q;
+      savePrayerSettings(s);
+      document.getElementById('prayerLocName').textContent = s.location;
+      await refreshPrayerStatusAfterFetch();
+    } catch (e) {
+      setPrayerStatus('<span class="err">❌ Kota tidak ditemukan / gagal: ' + escapeHtml(e.message || '?') + '</span>');
+    }
+  };
+  searchBtn.addEventListener('click', doSearch);
+  document.getElementById('prayerCity').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); doSearch(); }
+  });
+
+  formatSel.addEventListener('change', () => {
+    const s = loadPrayerSettings();
+    s.timeFormat = formatSel.value === '12h' ? '12h' : '24h';
+    savePrayerSettings(s);
+    renderPrayerStatus();
+  });
+}
+
+function setPrayerStatus(html) {
+  const el = document.getElementById('prayerStatus');
+  if (el) el.innerHTML = html;
+}
+
+async function refreshPrayerStatusAfterFetch() {
+  setPrayerStatus('⏳ Memuat jadwal shalat hari ini…');
+  try {
+    await ensurePrayerTimes(true);  // force — lokasi baru berubah
+    await renderPrayerStatus();
+  } catch (e) {
+    setPrayerStatus('<span class="err">❌ ' + escapeHtml(e.message || 'gagal memuat jadwal') + '</span>');
+  }
+}
+
+async function renderPrayerStatus() {
+  const s = loadPrayerSettings();
+  if (!s.enabled) {
+    setPrayerStatus('Strip sedang <b>nonaktif</b> — klik Aktifkan lalu atur lokasi (GPS atau cari kota).');
+    return;
+  }
+  if (typeof s.lat !== 'number' || typeof s.lng !== 'number') {
+    setPrayerStatus('⚠ <b>Belum ada lokasi</b> — pakai <b>📍 GPS</b> atau cari <b>kota</b> dulu supaya jadwal bisa dimuat.');
+    return;
+  }
+  setPrayerStatus('⏳ Memuat jadwal…');
+  try {
+    const times = await ensurePrayerTimes();
+    const model = buildStripModel(times);
+    const fmt = s.timeFormat === '12h' ? to12Hour : (t) => t;
+    let html = '';
+    if (model && model.hijriRaw) html += '📅 <b>' + escapeHtml(model.hijriRaw) + '</b><br>';
+    if (model && model.next) html += '🕌 Berikutnya: <b>' + (model.next.isSunnah ? '🌟 ' : '') + escapeHtml(model.next.name) + ' ' + fmt(model.next.time) + '</b> (−' + formatCountdown(model.next.minutesUntil) + ')<br>';
+    if (model && model.fast) html += '🌙 Puasa berikutnya: <b>' + escapeHtml(model.fast.name) + '</b> (' + dayAheadLabel(model.fast.daysAhead) + ')';
+    else if (model) html += '🌙 Tidak ada puasa sunnah dalam 14 hari ke depan.';
+    if (s.cachedAt) html += '<br><span style="font-size:10px;color:var(--text-muted)">Update: ' + escapeHtml(new Date(s.cachedAt).toLocaleString('id-ID')) + ' · <span class="okc">strip aktif di semua halaman</span></span>';
+    setPrayerStatus(html || '<span class="err">❌ jadwal kosong</span>');
+  } catch (e) {
+    setPrayerStatus('<span class="err">❌ ' + escapeHtml(e.message || 'gagal memuat jadwal') + '</span>');
+  }
 }
 
 function escapeHtml(s) {
