@@ -15,7 +15,9 @@ import './styles/v3.css';  // v1.14.0: Concept v3 — dock melayang, hairline, F
 import './styles/sticky.css';  // v1.17.0: strip sticky Waktu Shalat & Puasa (paling akhir)
 
 import { getSession, onAuthChange, handleOAuthCallback } from './auth.js';
-import { pullFromCloud, subscribeRealtime, unsubscribeRealtime, processSyncQueue, createFileItem } from './sync.js';
+import { pullFromCloud, subscribeRealtime, unsubscribeRealtime, processSyncQueue, createFileItem, cleanupExpiredTempItems } from './sync.js';
+// v1.18.0: label durasi untuk picker tujuan upload sementara
+import { TEMP_DURATIONS } from './lib/temp-upload.js';
 import { renderLogin, renderForgotPassword, renderResetPassword } from './views/login.js';
 import { renderMedia, startCaptureFlow, startDocumentFlow } from './views/media.js';
 import { renderNotes, openNoteEditor } from './views/notes.js';
@@ -299,6 +301,47 @@ function renderShell(user) {
   });
   document.getElementById('fabAdd').addEventListener('click', openFabMenu);
 
+  // v1.18.0: Auto-hapus file sementara kedaluwarsa — saat shell dirender + tiap
+  // 60 detik selama app terbuka. Item temp "hilang sendiri di vault sesuai
+  // batas waktu situs upload sementaranya" (permintaan user).
+  const _tempToast = (msg) => {
+    let t = document.getElementById('rfToast');
+    if (!t) {
+      t = document.createElement('div');
+      t.id = 'rfToast';
+      t.className = 'toast';
+      document.body.appendChild(t);
+    }
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2600);
+  };
+  const _refreshIfVaultView = () => {
+    if (_currentView === 'vault' || _currentView === 'media') navigateTo(_currentView);
+  };
+  (async () => {
+    try {
+      const n = await cleanupExpiredTempItems(user);
+      if (n > 0) {
+        _tempToast('⏳ ' + n + ' file sementara kedaluwarsa — dihapus dari vault');
+        _refreshIfVaultView();
+      }
+    } catch (e) { console.warn('[RecallFox] cleanup temp failed:', e); }
+  })();
+  if (!window.__rfTempCleanupTimer) {
+    window.__rfTempCleanupTimer = setInterval(async () => {
+      try {
+        const u = window.__rfUser;
+        if (!u) return;
+        const n = await cleanupExpiredTempItems(u);
+        if (n > 0) {
+          _tempToast('⏳ ' + n + ' file sementara kedaluwarsa — dihapus dari vault');
+          _refreshIfVaultView();
+        }
+      } catch (e) { /* non-fatal */ }
+    }, 60000);
+  }
+
   // v1.17.0: Strip sticky Waktu Shalat & Puasa — dirender SEKALI di shell
   // (di luar #appMain) supaya terlihat di SEMUA halaman tanpa ikut re-render
   // navigasi. Model sticky ala popup addon (bar ringkas + detail expandable).
@@ -342,7 +385,12 @@ function openFabMenu() {
 }
 
 // v1.13.0: Upload File Teks — modal standar (mirror addon saveFileUploadSheet)
+// v1.18.0: DUAL DESTINATION — pilihan tujuan ☁️ Database (permanen) |
+// ⏳ Sementara (litterbox.catbox.moe, durasi 1 jam–3 hari, item hilang
+// otomatis dari vault saat kedaluwarsa — dihapus oleh cleanupExpiredTempItems
+// di PWA + addon, sinkron antar device). Alur isi file tidak berubah.
 function openFileUploadSheet() {
+  const durOptions = TEMP_DURATIONS.map(d => `<option value="${d.id}"${d.id === '72h' ? ' selected' : ''}>${d.label}</option>`).join('');
   const sheet = document.createElement('div');
   sheet.className = 'bottom-sheet';
   sheet.innerHTML = `
@@ -355,6 +403,16 @@ function openFileUploadSheet() {
         <input type="text" id="fileTitle" placeholder="mis. Catatan rapat..." style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin:4px 0 12px;font-size:14px;background:var(--surface);color:var(--text)">
         <label style="font-size:12px;font-weight:600;color:var(--text-muted)">Tag <span style="font-weight:400">(pisah koma)</span></label>
         <input type="text" id="fileTags" placeholder="catatan, rapat" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin:4px 0 12px;font-size:14px;background:var(--surface);color:var(--text)">
+        <label style="font-size:12px;font-weight:600;color:var(--text-muted)">Tujuan simpan</label>
+        <div id="fileDestRow" style="display:flex;gap:8px;margin:4px 0 6px">
+          <button type="button" id="fileDestDb" style="flex:1;padding:10px 6px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;font-weight:600;outline:2px solid #6366f1">☁️ Database</button>
+          <button type="button" id="fileDestTemp" style="flex:1;padding:10px 6px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;font-weight:600;opacity:.55">⏳ Sementara</button>
+        </div>
+        <div id="fileTempDurRow" style="display:none;margin:4px 0 6px">
+          <label style="font-size:12px;font-weight:600;color:var(--text-muted)">Batas waktu <span style="font-weight:400">(file + item di vault hilang saat habis)</span></label>
+          <select id="fileTempDur" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin:4px 0 0;font-size:14px;background:var(--surface);color:var(--text)">${durOptions}</select>
+        </div>
+        <div id="fileDestNote" style="font-size:11px;color:var(--text-muted);margin:0 0 8px">☁️ Disimpan permanen ke database Supabase (perilaku lama).</div>
         <div id="fileDropzone" style="border:2px dashed var(--border-strong);border-radius:12px;padding:32px 16px;text-align:center;cursor:pointer;transition:border-color 0.2s,background 0.2s">
           <div style="font-size:40px;margin-bottom:8px">📄</div>
           <div style="font-weight:600;color:var(--text)">Klik untuk pilih file</div>
@@ -394,6 +452,27 @@ function openFileUploadSheet() {
   const fileInput = sheet.querySelector('#fileInputHidden');
 
   function closeSheet() { sheet.remove(); }
+
+  // v1.18.0: Toggle tujuan simpan — Database (permanen) / Sementara (litterbox)
+  let _dest = 'db';
+  const destDbBtn = sheet.querySelector('#fileDestDb');
+  const destTempBtn = sheet.querySelector('#fileDestTemp');
+  const tempDurRow = sheet.querySelector('#fileTempDurRow');
+  const destNote = sheet.querySelector('#fileDestNote');
+  function _paintDest() {
+    const isDb = _dest === 'db';
+    destDbBtn.style.opacity = isDb ? '1' : '.55';
+    destDbBtn.style.outline = isDb ? '2px solid #6366f1' : 'none';
+    destTempBtn.style.opacity = isDb ? '.55' : '1';
+    destTempBtn.style.outline = isDb ? 'none' : '2px solid #f59e0b';
+    tempDurRow.style.display = isDb ? 'none' : '';
+    destNote.textContent = isDb
+      ? '☁️ Disimpan permanen ke database Supabase (perilaku lama).'
+      : '⏳ File di-upload ke litterbox (catbox.moe) — URL publik (bisa dibuka AI chat). Setelah batas waktu habis, item ini hilang OTOMATIS dari vault di semua device.';
+  }
+  destDbBtn.addEventListener('click', () => { _dest = 'db'; _paintDest(); });
+  destTempBtn.addEventListener('click', () => { _dest = 'temp'; _paintDest(); });
+  _paintDest();
 
   function detectKind(name) {
     const dot = name.lastIndexOf('.');
@@ -439,14 +518,21 @@ function openFileUploadSheet() {
     const btn = sheet.querySelector('#fileSave');
     btn.textContent = '⏳ Menyimpan...'; btn.disabled = true;
     try {
+      // v1.18.0: Dual destination — temp = litterbox + durasi dari dropdown
+      const isTemp = _dest === 'temp';
       const result = await createFileItem(user, {
         title, body: _fileContent, tags: tagList,
-        source: { kind: _fileKind, mime: _fileMime, fileName: _fileName, size: _fileContent.length, uploadedFrom: 'pwa-upload', capturedAt: new Date().toISOString() }
-      });
+        source: { kind: _fileKind, mime: _fileMime, fileName: _fileName, size: _fileContent.length, uploadedFrom: isTemp ? 'pwa-upload-temp' : 'pwa-upload', capturedAt: new Date().toISOString() }
+      }, isTemp ? { destination: 'temp', duration: sheet.querySelector('#fileTempDur').value || '72h' } : {});
       if (result.ok) {
         closeSheet();
         navigateTo('vault');
-        setTimeout(() => alert('📤 ' + _fileName + ' tersimpan ✓'), 100);
+        if (isTemp) {
+          const d = (TEMP_DURATIONS.find(x => x.id === result.duration) || {}).label || result.duration;
+          setTimeout(() => alert('⏳ ' + _fileName + ' terupload sementara (' + d + ') — hilang otomatis dari vault'), 100);
+        } else {
+          setTimeout(() => alert('📤 ' + _fileName + ' tersimpan ✓'), 100);
+        }
       } else {
         alert('⚠ Gagal simpan: ' + (result.error || 'unknown'));
         btn.textContent = 'Simpan File'; btn.disabled = false;

@@ -10,7 +10,9 @@
 //   4. State update instan: dbPutVaultItem langsung + updateVaultItem cloud, renderList() (bukan reload)
 
 import { dbGetAllVaultItems, dbPutVaultItem, dbDeleteVaultItem } from '../db.js';
-import { deleteVaultItem, updateVaultItem } from '../sync.js';
+import { deleteVaultItem, updateVaultItem, cleanupExpiredTempItems } from '../sync.js';
+// v1.18.0: File sementara — countdown kedaluwarsa untuk badge vault
+import { tempRemainingLabel, isTempExpired } from '../lib/temp-upload.js';
 // v1.10.0: Folder ops — rename/archive/delete/move dengan guards anti-crash.
 import { renameFolder, archiveFolder, deleteFolder, moveFolder, cleanupOrphanFolders, findOrphanFolders } from '../lib/folder-ops.js';
 
@@ -177,6 +179,24 @@ async function renderList() {
 
   try {
     const allItems = await dbGetAllVaultItems();
+    // v1.18.0: Auto-hapus file sementara yang sudah kedaluwarsa — supaya item
+    // temp tidak sempat tampil di vault setelah batas waktunya habis (main.js
+    // juga menjalankan cleanup interval 60 detik; ini lapisan per-render).
+    try {
+      const _expired = allItems.filter(it => isTempExpired(it));
+      if (_expired.length > 0) {
+        for (const it of _expired) {
+          try { await deleteVaultItem(window.__rfUser, it.id); } catch (e) {
+            console.warn('[RecallFox] vault temp cleanup: hapus gagal:', it.id, e.message);
+          }
+          // Buang juga dari array kerja supaya render kali ini tidak menampilkan
+          // item yang baru saja dihapus (allItems diambil sebelum cleanup).
+          const _idx = allItems.indexOf(it);
+          if (_idx >= 0) allItems.splice(_idx, 1);
+        }
+        showToast('⏳ ' + _expired.length + ' file sementara kedaluwarsa — dihapus dari vault');
+      }
+    } catch (e) { /* non-fatal */ }
     // v1.8.0: Filter TEXT_TYPES + folder groups (isGroup). Folder groups punya source.isGroup=true.
     // v1.11.1 FIX BUG "folder duplikat render":
     //   Sebelumnya: `items = allItems.filter(i => TEXT_TYPES.includes(i.type) && !i.archived)`
@@ -594,6 +614,15 @@ function renderItemCard(item, indent = 0) {
     }
   }
 
+  // v1.18.0: Badge file sementara — countdown kedaluwarsa (item hilang otomatis
+  // dari vault saat batas waktu habis; cleanup oleh sync.cleaupExpiredTempItems).
+  const tempSrc = item.source || {};
+  let tempInfo = '';
+  if (tempSrc.tempHost && tempSrc.tempUrl) {
+    const remain = tempRemainingLabel(tempSrc.tempExpiresAt);
+    tempInfo = `<div class="item-meta" title="File sementara — hilang otomatis dari vault saat batas waktu habis">⏳ Sementara (${escapeHtml(tempSrc.tempHost)}) · sisa ${escapeHtml(remain)}</div>`;
+  }
+
   return `
     <div class="vault-item ${isSelected} ${pinnedCls}" data-id="${item.id}" style="margin-left:${indent}px">
       <div class="item-type-badge" style="background:${typeInfo.color}">${typeInfo.icon}</div>
@@ -604,6 +633,7 @@ function renderItemCard(item, indent = 0) {
         ${snapshotInfo}
         ${bundleInfo}
         ${locationInfo}
+        ${tempInfo}
         ${tags ? `<div class="item-tags">${tags}</div>` : ''}
       </div>
       <div class="item-actions">
@@ -666,7 +696,9 @@ async function copyItem(id) {
       // v1.12.0: Type-aware copy — link→URL, file→body (isi teks), lainnya→body
       text = item.link_url || item.linkUrl || item.body || item.title || '';
     } else if (item.type === 'file') {
-      text = item.body || item.title || '';
+      // v1.18.0: File sementara binary punya body kosong — salin URL temp
+      // supaya tombol Salin tetap berguna (URL publik bisa dibuka AI chat).
+      text = item.body || (item.source && item.source.tempUrl) || item.title || '';
     } else {
       text = item.body || item.note || item.title || '';
     }

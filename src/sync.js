@@ -19,6 +19,11 @@
 //     PWA hanya insert ke vault_items).
 
 import { supabase, STORAGE_BUCKET, DOCUMENTS_BUCKET, VAULT_TABLE, NOTES_TABLE } from './supabase.js';
+// v1.18.0: Upload file sementara (dual destination) — host litterbox,
+// item hilang otomatis dari vault saat kedaluwarsa. Modul identik dengan addon.
+import {
+  TEMP_DURATIONS, uploadToTempHost, isTempExpired
+} from './lib/temp-upload.js';
 import {
   dbGetAllVaultItems, dbPutVaultItem, dbDeleteVaultItem,
   dbGetAllNotes, dbPutNote, dbDeleteNote,
@@ -523,13 +528,76 @@ export async function createScreenshotItem(user, payload) {
 // v1.13.0: createFileItem — Upload file teks ke Supabase Storage + insert vault_items
 // Mirror addon _uploadFileDocument + addItem flow.
 // payload: { title, body, tags, source: { kind, mime, fileName, size, uploadedFrom, capturedAt } }
-export async function createFileItem(user, payload) {
+// v1.18.0: DUAL DESTINATION — opts.destination:
+//   - 'database' (default): Supabase Storage + vault_items (perilaku lama).
+//   - 'temp': file di-upload ke litterbox.catbox.moe (durasi opts.duration:
+//     '1h'|'12h'|'24h'|'72h') → URL publik; yang masuk vault_items hanya
+//     metadata + URL temp. Item otomatis dihapus dari vault saat kedaluwarsa
+//     oleh cleanupExpiredTempItems (addon + PWA). Upload gagal = item TIDAK
+//     dibuat. PWA pakai litterbox (CORS *) — temp.sh ditolak hasil audit
+//     (URL selalu HTML page, bukan file mentah).
+export async function createFileItem(user, payload, opts = {}) {
   const itemId = genId('f');
   const now = new Date().toISOString();
-  console.log('[RecallFox] createFileItem START:', itemId, 'user:', user?.id, 'fileName:', payload.source?.fileName);
+  const isTemp = opts.destination === 'temp';
+  console.log('[RecallFox] createFileItem START:', itemId, 'user:', user?.id, 'fileName:', payload.source?.fileName, 'dest:', isTemp ? 'temp(' + (opts.duration || '72h') + ')' : 'database');
 
   const kind = payload.source?.kind || 'txt';
   const mime = payload.source?.mime || 'text/plain';
+
+  // ===== v1.18.0: Tujuan SEMENTARA — upload ke litterbox, bukan Storage =====
+  if (isTemp) {
+    const extMap = { md: 'md', txt: 'txt', json: 'json', html: 'html', csv: 'csv', yaml: 'yaml' };
+    const fileName = payload.source?.fileName || (itemId + '.' + (extMap[kind] || 'txt'));
+    const blob = new Blob([payload.body || ''], { type: mime });
+    const up = await uploadToTempHost(blob, fileName, opts.duration || '72h');
+    if (!up.ok) {
+      console.error('[RecallFox] createFileItem temp upload FAILED:', up.error);
+      return { ok: false, error: 'temp_upload_failed: ' + up.error };
+    }
+    const row = {
+      id: itemId,
+      user_id: user.id,
+      type: 'file',
+      title: payload.title || payload.source?.fileName || 'File Upload',
+      body: payload.body || '',
+      tags: payload.tags || ['file', kind],
+      category: null,
+      source: {
+        ...(payload.source || {}),
+        tempHost: up.host,
+        tempUrl: up.url,
+        tempExpiresAt: up.expiresAt,
+        tempDuration: up.duration
+      },
+      gdrive_file_id: null,
+      gdrive_file_url: null,
+      favorite: false,
+      archived: false,
+      use_count: 0,
+      created_at: now,
+      updated_at: now
+    };
+    try {
+      const { error: insertErr } = await supabase.from(VAULT_TABLE).upsert(row);
+      if (insertErr) {
+        console.error('[RecallFox] createFileItem temp insert error:', insertErr.message);
+        return { ok: false, error: insertErr.message };
+      }
+    } catch (e) {
+      console.error('[RecallFox] createFileItem temp insert exception:', e.message);
+      return { ok: false, error: e.message };
+    }
+    try {
+      await dbPutVaultItem({ ...row, gdriveFileId: null, gdriveFileUrl: null });
+    } catch (e) {
+      console.warn('[RecallFox] createFileItem temp: IndexedDB cache failed (not fatal):', e.message);
+    }
+    console.log('[RecallFox] createFileItem temp OK:', itemId, '→', up.url);
+    return { ok: true, itemId, temp: true, tempUrl: up.url, expiresAt: up.expiresAt, duration: up.duration };
+  }
+
+  // ===== Tujuan DATABASE (perilaku lama) =====
   const extMap = { md: 'md', txt: 'txt', json: 'json', html: 'html', csv: 'csv', yaml: 'yaml' };
   const ext = extMap[kind] || 'txt';
   const path = `user-${user.id}/${itemId}.${ext}`;
@@ -622,6 +690,36 @@ export async function deleteVaultItem(user, itemId) {
   await dbDeleteVaultItem(itemId);
   await dbDeleteScreenshotBlob(itemId);
   return { ok: true };
+}
+
+// ===== v1.18.0: Auto-cleanup file sementara kedaluwarsa =====
+// Permintaan user: item upload "sementara" (litterbox) "akan hilang sendiri di
+// vault sesuai dengan batas waktu di situs upload sementaranya". Scan
+// IndexedDB → item file dengan source.tempExpiresAt lewat → deleteVaultItem()
+// (delete registry + hard-delete cloud + hapus IndexedDB). Supabase gagal
+// tetap lanjut hapus lokal (queue delete_vault di-enqueue oleh deleteVaultItem).
+// Realtime DELETE + delete registry menyebarkan hapus ini ke device lain.
+// Return jumlah item yang dihapus.
+export async function cleanupExpiredTempItems(user) {
+  try {
+    const items = await dbGetAllVaultItems();
+    const expired = items.filter(it => isTempExpired(it));
+    if (expired.length === 0) return 0;
+    let removed = 0;
+    for (const it of expired) {
+      try {
+        await deleteVaultItem(user || window.__rfUser, it.id);
+        removed++;
+      } catch (e) {
+        console.warn('[RecallFox] cleanupExpiredTempItems: hapus gagal:', it.id, e.message);
+      }
+    }
+    console.log('[RecallFox] cleanupExpiredTempItems:', removed, 'item dihapus');
+    return removed;
+  } catch (e) {
+    console.warn('[RecallFox] cleanupExpiredTempItems failed:', e.message);
+    return 0;
+  }
 }
 
 // ===== v1.6.4: Update vault item (title, annotationNote, etc.) =====
