@@ -18,6 +18,8 @@ import { getSession, onAuthChange, handleOAuthCallback } from './auth.js';
 import { pullFromCloud, subscribeRealtime, unsubscribeRealtime, processSyncQueue, createFileItem, cleanupExpiredTempItems } from './sync.js';
 // v1.18.0: label durasi untuk picker tujuan upload sementara
 import { TEMP_DURATIONS } from './lib/temp-upload.js';
+// v1.20.0: klasifikasi file 1:1 addon (teks + Office + gambar + arsip)
+import { detectFileKind, rejectHintFor, kindIcon, formatBytes, FILE_ACCEPT_ATTR, MAX_TEXT_UPLOAD_BYTES, MAX_BINARY_UPLOAD_BYTES, MAX_TEMP_UPLOAD_BYTES } from './lib/file-kinds.js';
 import { renderLogin, renderForgotPassword, renderResetPassword } from './views/login.js';
 import { renderMedia, startCaptureFlow, startDocumentFlow } from './views/media.js';
 import { renderNotes, openNoteEditor } from './views/notes.js';
@@ -360,7 +362,7 @@ function openFabMenu() {
       <button class="sheet-btn" data-action="gallery"><span class="sheet-ic">🖼️</span>Dari Galeri</button>
       <button class="sheet-btn" data-action="document"><span class="sheet-ic">📄</span>Scan Dokumen</button>
       <button class="sheet-btn" data-action="paste"><span class="sheet-ic">📋</span>Paste dari Clipboard</button>
-      <button class="sheet-btn" data-action="upload-file"><span class="sheet-ic">📎</span>Upload File Teks</button>
+      <button class="sheet-btn" data-action="upload-file"><span class="sheet-ic">📎</span>Upload File</button>
       <button class="sheet-btn" data-action="note"><span class="sheet-ic">📝</span>Catatan Baru</button>
       <button class="sheet-btn" data-action="folder"><span class="sheet-ic">📁</span>Folder Baru</button>
       <button class="sheet-btn cancel" data-action="cancel">Batal</button>
@@ -384,7 +386,8 @@ function openFabMenu() {
   });
 }
 
-// v1.13.0: Upload File Teks — modal standar (mirror addon saveFileUploadSheet)
+// v1.13.0: Upload File — modal standar (mirror addon saveFileUploadSheet)
+// v1.20.0: samakan addon — teks + kode (2MB) + PDF/Office/gambar/arsip (10MB DB / 1GB temp)
 // v1.18.0: DUAL DESTINATION — pilihan tujuan ☁️ Database (permanen) |
 // ⏳ Sementara (litterbox.catbox.moe, durasi 1 jam–3 hari, item hilang
 // otomatis dari vault saat kedaluwarsa — dihapus oleh cleanupExpiredTempItems
@@ -397,7 +400,7 @@ function openFileUploadSheet() {
     <div class="sheet-backdrop"></div>
     <div class="sheet-content">
       <div class="sheet-handle"></div>
-      <h3>📄 Upload File Teks</h3>
+      <h3>📄 Upload File</h3>
       <div style="padding:0 4px">
         <label style="font-size:12px;font-weight:600;color:var(--text-muted)">Judul <span style="font-weight:400">(opsional)</span></label>
         <input type="text" id="fileTitle" placeholder="mis. Catatan rapat..." style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin:4px 0 12px;font-size:14px;background:var(--surface);color:var(--text)">
@@ -417,12 +420,13 @@ function openFileUploadSheet() {
           <div style="font-size:40px;margin-bottom:8px">📄</div>
           <div style="font-weight:600;color:var(--text)">Klik untuk pilih file</div>
           <div style="font-size:12px;margin-top:4px;color:var(--text-muted)">atau drag & drop</div>
-          <div style="font-size:11px;margin-top:4px;color:var(--text-subtle)">Format: .md, .txt, .json, .html, .csv, .yaml (maks 2MB Database · 1GB Sementara)</div>
+          <div style="font-size:11px;margin-top:4px;color:var(--text-subtle)">Teks + kode (maks 2MB)<br>PDF, Office, gambar, arsip .zip/.rar/.7z/.tar (maks 10MB Database · 1GB Sementara)</div>
         </div>
-        <input type="file" id="fileInputHidden" accept=".md,.markdown,.txt,.json,.html,.htm,.csv,.yaml,.yml" style="display:none">
+        <input type="file" id="fileInputHidden" accept="${FILE_ACCEPT_ATTR}" style="display:none">
         <div id="filePreview" style="display:none;margin:12px 0">
           <div style="font-size:12px;color:var(--text-muted)" id="filePreviewMeta"></div>
           <div id="filePreviewText" style="font-size:11px;background:var(--surface-2);padding:8px 10px;border-radius:6px;margin-top:4px;max-height:120px;overflow-y:auto;white-space:pre-wrap;font-family:monospace"></div>
+          <div id="filePreviewMedia" style="display:none;margin-top:8px"></div>
         </div>
         <div style="display:flex;gap:8px;margin-top:16px">
           <button class="btn btn-secondary" id="fileCancel" style="flex:1">Batal</button>
@@ -434,22 +438,10 @@ function openFileUploadSheet() {
   document.body.appendChild(sheet);
   setTimeout(() => sheet.classList.add('open'), 10);
 
-  const FILE_WHITELIST = {
-    '.md': { kind: 'md', mime: 'text/markdown' },
-    '.markdown': { kind: 'md', mime: 'text/markdown' },
-    '.txt': { kind: 'txt', mime: 'text/plain' },
-    '.json': { kind: 'json', mime: 'application/json' },
-    '.html': { kind: 'html', mime: 'text/html' },
-    '.htm': { kind: 'html', mime: 'text/html' },
-    '.csv': { kind: 'csv', mime: 'text/csv' },
-    '.yaml': { kind: 'yaml', mime: 'text/yaml' },
-    '.yml': { kind: 'yaml', mime: 'text/yaml' }
-  };
-  const MAX_BYTES = 2 * 1024 * 1024;
-  // v1.19.0: maksimalkan litterbox ke batas server — 1GB (Database tetap 2MB)
-  const MAX_TEMP_BYTES = 1024 * 1024 * 1024;
-  let _fileContent = null, _fileName = '', _fileKind = null, _fileMime = 'text/plain';
-  let _fileSize = 0;
+  // v1.20.0: batas 1:1 addon — teks 2MB (semua tujuan), binary 10MB DB / 1GB temp.
+  // MAX_* diimpor dari lib/file-kinds.js (sama persis dengan addon).
+  let _fileContent = null, _fileBlob = null, _fileName = '', _fileKind = null, _fileMime = 'text/plain';
+  let _fileIsBinary = false, _fileSize = 0;
 
   const dropzone = sheet.querySelector('#fileDropzone');
   const fileInput = sheet.querySelector('#fileInputHidden');
@@ -470,34 +462,58 @@ function openFileUploadSheet() {
     destTempBtn.style.outline = isDb ? 'none' : '2px solid #f59e0b';
     tempDurRow.style.display = isDb ? 'none' : '';
     destNote.textContent = isDb
-      ? '☁️ Disimpan permanen ke database Supabase (perilaku lama, maks 2MB).'
-      : '⏳ File di-upload ke litterbox (catbox.moe) — URL publik (bisa dibuka AI chat). Maks 1GB. Setelah batas waktu habis, item ini hilang OTOMATIS dari vault di semua device.';
+      ? '☁️ Disimpan permanen ke database Supabase — teks maks 2MB, binary maks 10MB.'
+      : '⏳ File di-upload ke litterbox (catbox.moe) — URL publik (bisa dibuka AI chat). Teks maks 2MB, binary maks 1GB. Setelah batas waktu habis, item ini hilang OTOMATIS dari vault di semua device.';
   }
   destDbBtn.addEventListener('click', () => { _dest = 'db'; _paintDest(); });
   destTempBtn.addEventListener('click', () => { _dest = 'temp'; _paintDest(); });
   _paintDest();
 
-  function detectKind(name) {
-    const dot = name.lastIndexOf('.');
-    if (dot < 0) return null;
-    return FILE_WHITELIST[name.slice(dot).toLowerCase()] || null;
-  }
-
+  // v1.20.0: deteksi 1:1 addon (detectFileKind) — teks + Office + gambar + arsip.
   async function handleFile(file) {
-    const info = detectKind(file.name);
-    if (!info) { alert('Format tidak didukung: ' + file.name); return; }
-    // v1.19.0: validasi sesuai tujuan — Database 2MB, Sementara 1GB (batas maksimal litterbox)
-    const limit = _dest === 'temp' ? MAX_TEMP_BYTES : MAX_BYTES;
-    if (file.size > limit) { alert('File terlalu besar (maks ' + (_dest === 'temp' ? '1GB Sementara' : '2MB Database') + ')'); return; }
-    const text = await file.text();
-    if (!text || text.length === 0) { alert('File kosong'); return; }
-    _fileContent = text; _fileName = file.name; _fileKind = info.kind; _fileMime = info.mime; _fileSize = file.size;
+    const info = detectFileKind(file);
+    if (!info) {
+      const hint = rejectHintFor(file);
+      alert('Format tidak didukung: ' + file.name + (hint ? ' — ' + hint : ''));
+      return;
+    }
+    // v1.20.0: batas terluas dulu saat pilih (binary 1GB) — validasi per tujuan diulang saat simpan.
+    const pickMax = info.binary ? Math.max(MAX_BINARY_UPLOAD_BYTES, MAX_TEMP_UPLOAD_BYTES) : MAX_TEXT_UPLOAD_BYTES;
+    if (file.size > pickMax) { alert('File terlalu besar (maks ' + (info.binary ? '1GB' : '2MB') + ')'); return; }
+    _fileName = file.name; _fileKind = info.kind; _fileMime = info.mime;
+    _fileIsBinary = !!info.binary; _fileSize = file.size;
     const meta = sheet.querySelector('#filePreviewMeta');
-    const preview = sheet.querySelector('#filePreviewText');
+    const previewText = sheet.querySelector('#filePreviewText');
+    const previewMedia = sheet.querySelector('#filePreviewMedia');
     const box = sheet.querySelector('#filePreview');
-    const sizeKb = (file.size / 1024).toFixed(1);
-    meta.textContent = '📎 ' + file.name + ' · ' + sizeKb + ' KB · ' + info.kind;
-    preview.textContent = text.slice(0, 500) + (text.length > 500 ? '\n... (' + text.length + ' chars)' : '');
+    const sizeStr = formatBytes(file.size);
+    if (_fileIsBinary) {
+      const buf = await file.arrayBuffer();
+      if (!buf || buf.byteLength === 0) { alert('File kosong'); return; }
+      _fileContent = null;
+      _fileBlob = new Blob([buf], { type: _fileMime });
+      meta.textContent = '📎 ' + file.name + ' · ' + sizeStr + ' · ' + info.kind + ' (binary)';
+      previewText.style.display = 'none';
+      previewMedia.style.display = '';
+      const objUrl = URL.createObjectURL(_fileBlob);
+      if (info.kind === 'pdf') {
+        previewMedia.innerHTML = '<embed src="' + objUrl + '" type="application/pdf" style="width:100%;height:200px;border:none;border-radius:6px">';
+      } else if ((_fileMime || '').startsWith('image/')) {
+        previewMedia.innerHTML = '<img src="' + objUrl + '" style="max-width:100%;max-height:200px;display:block;margin:0 auto;border-radius:6px">';
+      } else {
+        previewMedia.innerHTML = '<div style="font-size:12px;padding:10px;background:var(--surface-2);border-radius:6px">' + (kindIcon(info.kind) || '📎') + ' <b>' + file.name.replace(/</g, '&lt;') + '</b> · ' + sizeStr + '<div style="font-size:10px;color:#999;margin-top:2px">Pratinjau tidak tersedia — file disimpan apa adanya & bisa diunduh.</div></div>';
+      }
+      setTimeout(() => { try { URL.revokeObjectURL(objUrl); } catch (e) {} }, 60000);
+    } else {
+      const text = await file.text();
+      if (!text || text.length === 0) { alert('File kosong'); return; }
+      _fileContent = text; _fileBlob = null;
+      meta.textContent = '📎 ' + file.name + ' · ' + sizeStr + ' · ' + info.kind;
+      previewText.style.display = '';
+      previewMedia.style.display = 'none';
+      previewMedia.innerHTML = '';
+      previewText.textContent = text.slice(0, 500) + (text.length > 500 ? '\n... (' + text.length + ' chars)' : '');
+    }
     box.style.display = '';
     sheet.querySelector('#fileSave').disabled = false;
     const titleEl = sheet.querySelector('#fileTitle');
@@ -514,7 +530,8 @@ function openFileUploadSheet() {
   sheet.querySelector('.sheet-backdrop').addEventListener('click', closeSheet);
 
   sheet.querySelector('#fileSave').addEventListener('click', async () => {
-    if (!_fileContent) { alert('Pilih file dulu'); return; }
+    if (!_fileIsBinary && !_fileContent) { alert('Pilih file dulu'); return; }
+    if (_fileIsBinary && !_fileBlob) { alert('Pilih file dulu'); return; }
     const user = window.__rfUser;
     if (!user) { alert('Belum login'); return; }
     const title = (sheet.querySelector('#fileTitle').value || '').trim() || _fileName;
@@ -523,15 +540,19 @@ function openFileUploadSheet() {
     const btn = sheet.querySelector('#fileSave');
     btn.textContent = '⏳ Menyimpan...'; btn.disabled = true;
     try {
-      // v1.18.0: Dual destination — temp = litterbox + durasi dari dropdown
-      // v1.19.0: validasi ulang sesuai tujuan — Database 2MB, Sementara 1GB
+      // v1.20.0: validasi ulang 1:1 addon — teks 2MB (semua tujuan), binary 10MB DB / 1GB temp.
       const isTemp = _dest === 'temp';
-      const saveLimit = isTemp ? MAX_TEMP_BYTES : MAX_BYTES;
-      if (_fileSize > saveLimit) { alert('⚠ File terlalu besar untuk tujuan ' + (isTemp ? '⏳ Sementara (maks 1GB)' : '☁️ Database (maks 2MB)')); btn.textContent = 'Simpan File'; btn.disabled = false; return; }
+      const saveLimit = _fileIsBinary ? (isTemp ? MAX_TEMP_UPLOAD_BYTES : MAX_BINARY_UPLOAD_BYTES) : MAX_TEXT_UPLOAD_BYTES;
+      if (_fileSize > saveLimit) {
+        alert('⚠ File terlalu besar untuk tujuan ' + (isTemp ? '⏳ Sementara (teks maks 2MB, binary maks 1GB)' : '☁️ Database (teks maks 2MB, binary maks 10MB)'));
+        btn.textContent = 'Simpan File'; btn.disabled = false; return;
+      }
+      const saveOpts = isTemp ? { destination: 'temp', duration: sheet.querySelector('#fileTempDur').value || '72h' } : {};
+      if (_fileIsBinary) saveOpts.fileBlob = _fileBlob;
       const result = await createFileItem(user, {
-        title, body: _fileContent, tags: tagList,
-        source: { kind: _fileKind, mime: _fileMime, fileName: _fileName, size: _fileContent.length, uploadedFrom: isTemp ? 'pwa-upload-temp' : 'pwa-upload', capturedAt: new Date().toISOString() }
-      }, isTemp ? { destination: 'temp', duration: sheet.querySelector('#fileTempDur').value || '72h' } : {});
+        title, body: _fileIsBinary ? '' : _fileContent, tags: tagList,
+        source: { kind: _fileKind, mime: _fileMime, fileName: _fileName, size: _fileSize, isBinary: _fileIsBinary, uploadedFrom: isTemp ? 'pwa-upload-temp' : 'pwa-upload', capturedAt: new Date().toISOString() }
+      }, saveOpts);
       if (result.ok) {
         closeSheet();
         navigateTo('vault');

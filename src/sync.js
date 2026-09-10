@@ -525,9 +525,11 @@ export async function createScreenshotItem(user, payload) {
   };
 }
 
-// v1.13.0: createFileItem — Upload file teks ke Supabase Storage + insert vault_items
+// v1.13.0: createFileItem — Upload file ke Supabase Storage + insert vault_items
 // Mirror addon _uploadFileDocument + addItem flow.
-// payload: { title, body, tags, source: { kind, mime, fileName, size, uploadedFrom, capturedAt } }
+// v1.20.0: dukung binary 1:1 addon (PDF/Office/gambar/arsip) — byte utuh via
+// opts.fileBlob (Blob); body binary = '' (vault JSON tetap ringan).
+// payload: { title, body, tags, source: { kind, mime, fileName, size, isBinary, uploadedFrom, capturedAt } }
 // v1.18.0: DUAL DESTINATION — opts.destination:
 //   - 'database' (default): Supabase Storage + vault_items (perilaku lama).
 //   - 'temp': file di-upload ke litterbox.catbox.moe (durasi opts.duration:
@@ -544,12 +546,13 @@ export async function createFileItem(user, payload, opts = {}) {
 
   const kind = payload.source?.kind || 'txt';
   const mime = payload.source?.mime || 'text/plain';
+  const isBinary = !!(payload.source?.isBinary || opts.fileBlob);
 
   // ===== v1.18.0: Tujuan SEMENTARA — upload ke litterbox, bukan Storage =====
   if (isTemp) {
-    const extMap = { md: 'md', txt: 'txt', json: 'json', html: 'html', csv: 'csv', yaml: 'yaml' };
-    const fileName = payload.source?.fileName || (itemId + '.' + (extMap[kind] || 'txt'));
-    const blob = new Blob([payload.body || ''], { type: mime });
+    const { cloudExt } = await import('./lib/file-kinds.js');
+    const fileName = payload.source?.fileName || (itemId + '.' + cloudExt(kind, isBinary));
+    const blob = opts.fileBlob instanceof Blob ? opts.fileBlob : new Blob([payload.body || ''], { type: mime });
     const up = await uploadToTempHost(blob, fileName, opts.duration || '72h');
     if (!up.ok) {
       console.error('[RecallFox] createFileItem temp upload FAILED:', up.error);
@@ -560,7 +563,7 @@ export async function createFileItem(user, payload, opts = {}) {
       user_id: user.id,
       type: 'file',
       title: payload.title || payload.source?.fileName || 'File Upload',
-      body: payload.body || '',
+      body: isBinary ? '' : (payload.body || ''),
       tags: payload.tags || ['file', kind],
       category: null,
       source: {
@@ -598,10 +601,10 @@ export async function createFileItem(user, payload, opts = {}) {
   }
 
   // ===== Tujuan DATABASE (perilaku lama) =====
-  const extMap = { md: 'md', txt: 'txt', json: 'json', html: 'html', csv: 'csv', yaml: 'yaml' };
-  const ext = extMap[kind] || 'txt';
+  const { cloudExt: _cloudExt } = await import('./lib/file-kinds.js');
+  const ext = _cloudExt(kind, isBinary);
   const path = `user-${user.id}/${itemId}.${ext}`;
-  const blob = new Blob([payload.body], { type: mime });
+  const blob = opts.fileBlob instanceof Blob ? opts.fileBlob : new Blob([payload.body || ''], { type: mime });
 
   // Step 1: Upload blob to Storage bucket 'documents'
   let storageUrl = null;
@@ -619,13 +622,13 @@ export async function createFileItem(user, payload, opts = {}) {
     console.warn('[RecallFox] File upload exception:', e.message);
   }
 
-  // Step 2: Insert vault_items row
+  // Step 2: Insert vault_items row (binary: body kosong — byte utuh di Storage)
   const row = {
     id: itemId,
     user_id: user.id,
     type: 'file',
     title: payload.title || payload.source?.fileName || 'File Upload',
-    body: payload.body || '',
+    body: isBinary ? '' : (payload.body || ''),
     tags: payload.tags || ['file', kind],
     category: null,
     source: payload.source || null,

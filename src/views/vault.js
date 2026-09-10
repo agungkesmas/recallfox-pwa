@@ -623,6 +623,15 @@ function renderItemCard(item, indent = 0) {
     tempInfo = `<div class="item-meta" title="File sementara — hilang otomatis dari vault saat batas waktu habis">⏳ Sementara (${escapeHtml(tempSrc.tempHost)}) · sisa ${escapeHtml(remain)}</div>`;
   }
 
+  // v1.20.0: Info file binary (body kosong) — nama + ukuran + link unduh, 1:1 info addon.
+  let fileInfo = '';
+  if (item.type === 'file' && tempSrc.isBinary && !item.body) {
+    const fn = escapeHtml(tempSrc.fileName || 'file');
+    const sz = tempSrc.size ? ' · ' + escapeHtml(_formatBytes(tempSrc.size)) : '';
+    const dl = tempSrc.tempUrl || item.gdrive_file_url || item.gdriveFileUrl || '';
+    fileInfo = `<div class="item-meta">📎 ${fn}${sz}` + (dl ? ` · <a href="${escapeHtml(dl)}" target="_blank" rel="noopener">Unduh</a>` : '') + `</div>`;
+  }
+
   return `
     <div class="vault-item ${isSelected} ${pinnedCls}" data-id="${item.id}" style="margin-left:${indent}px">
       <div class="item-type-badge" style="background:${typeInfo.color}">${typeInfo.icon}</div>
@@ -634,6 +643,7 @@ function renderItemCard(item, indent = 0) {
         ${bundleInfo}
         ${locationInfo}
         ${tempInfo}
+        ${fileInfo}
         ${tags ? `<div class="item-tags">${tags}</div>` : ''}
       </div>
       <div class="item-actions">
@@ -643,6 +653,14 @@ function renderItemCard(item, indent = 0) {
       </div>
     </div>
   `;
+}
+
+function _formatBytes(n) {
+  if (!n && n !== 0) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+  if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GB';
 }
 
 function openItemDetail(id) {
@@ -698,7 +716,8 @@ async function copyItem(id) {
     } else if (item.type === 'file') {
       // v1.18.0: File sementara binary punya body kosong — salin URL temp
       // supaya tombol Salin tetap berguna (URL publik bisa dibuka AI chat).
-      text = item.body || (item.source && item.source.tempUrl) || item.title || '';
+      // v1.20.0: binary Database juga body kosong — fallback ke URL Storage.
+      text = item.body || (item.source && item.source.tempUrl) || item.gdrive_file_url || item.gdriveFileUrl || item.title || '';
     } else {
       text = item.body || item.note || item.title || '';
     }
@@ -799,7 +818,7 @@ function buildBundleContent(bundle, allItems) {
     if (m.type === 'link') {
       body = m.link_url || m.linkUrl || m.body || '';
     } else if (m.type === 'file') {
-      body = m.body || '';
+      body = m.body || m.source?.tempUrl || m.gdrive_file_url || m.gdriveFileUrl || '';
     } else if (m.type === 'context' || m.type === 'prompt' || m.type === 'snapshot') {
       body = m.body || m.note || '';
     } else if (m.type === 'screenshot' || m.type === 'document') {
