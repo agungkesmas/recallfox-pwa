@@ -542,11 +542,62 @@ export async function createFileItem(user, payload, opts = {}) {
   const itemId = genId('f');
   const now = new Date().toISOString();
   const isTemp = opts.destination === 'temp';
-  console.log('[RecallFox] createFileItem START:', itemId, 'user:', user?.id, 'fileName:', payload.source?.fileName, 'dest:', isTemp ? 'temp(' + (opts.duration || '72h') + ')' : 'database');
+  const isManual = opts.destination === 'manual';
+  console.log('[RecallFox] createFileItem START:', itemId, 'user:', user?.id, 'fileName:', payload.source?.fileName, 'dest:', isManual ? 'manual' : (isTemp ? 'temp(' + (opts.duration || '72h') + ')' : 'database'));
 
   const kind = payload.source?.kind || 'txt';
   const mime = payload.source?.mime || 'text/plain';
   const isBinary = !!(payload.source?.isBinary || opts.fileBlob);
+
+  // ===== v1.21.0: MANUAL — URL ditempel user, TANPA upload. Vault TTL 72 jam.
+  // Struktur row identik dengan temp (tempHost/tempUrl/tempExpiresAt) supaya
+  // cleanupExpiredTempItems + badge countdown + sinkron antar device jalan
+  // tanpa perubahan apa pun di sisi baca.
+  if (isManual) {
+    const mUrl = payload.source?.tempUrl || '';
+    if (!/^https:\/\//i.test(mUrl)) return { ok: false, error: 'URL manual harus https://' };
+    const row = {
+      id: itemId,
+      user_id: user.id,
+      type: 'file',
+      title: payload.title || payload.source?.fileName || 'File Upload',
+      body: '',
+      tags: payload.tags || ['file', kind],
+      category: null,
+      source: {
+        ...(payload.source || {}),
+        tempHost: payload.source?.tempHost || 'manual',
+        tempUrl: mUrl,
+        tempExpiresAt: payload.source?.tempExpiresAt || null,
+        tempDuration: payload.source?.tempDuration || '72h'
+      },
+      gdrive_file_id: null,
+      gdrive_file_url: null,
+      favorite: false,
+      archived: false,
+      use_count: 0,
+      created_at: now,
+      updated_at: now
+    };
+    if (!row.source.tempExpiresAt) return { ok: false, error: 'manual tanpa batas waktu' };
+    try {
+      const { error: insertErr } = await supabase.from(VAULT_TABLE).upsert(row);
+      if (insertErr) {
+        console.error('[RecallFox] createFileItem manual insert error:', insertErr.message);
+        return { ok: false, error: insertErr.message };
+      }
+    } catch (e) {
+      console.error('[RecallFox] createFileItem manual insert exception:', e.message);
+      return { ok: false, error: e.message };
+    }
+    try {
+      await dbPutVaultItem({ ...row, gdriveFileId: null, gdriveFileUrl: null });
+    } catch (e) {
+      console.warn('[RecallFox] createFileItem manual: IndexedDB cache failed (not fatal):', e.message);
+    }
+    console.log('[RecallFox] createFileItem manual OK:', itemId, '→', mUrl);
+    return { ok: true, itemId, manual: true, tempUrl: mUrl, expiresAt: row.source.tempExpiresAt, duration: row.source.tempDuration };
+  }
 
   // ===== v1.18.0: Tujuan SEMENTARA — upload ke litterbox, bukan Storage =====
   if (isTemp) {

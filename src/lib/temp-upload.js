@@ -34,6 +34,22 @@ export const TEMP_HOST_LABEL = 'litterbox (catbox.moe)';
 export const TEMP_UPLOAD_ENDPOINT =
   'https://litterbox.catbox.moe/resources/internals/api.php';
 
+// v1.21.0: tujuan ketiga — MANUAL. User upload sendiri di situs luar (klik,
+// tab baru), lalu tempel URL. Tidak ada upload otomatis, tidak ada retry.
+// Vault manual selalu TTL 72 jam (3 hari) terlepas dari masa simpan situs.
+export const TEMP_HOST_MANUAL = 'manual';
+export const MANUAL_TEMP_DURATION = '72h';
+// Daftar situs terverifikasi via curl 2026-09-10/11 (raw + direct):
+// litterbox (CORS *, raw, 1GB), catbox (raw, permanen, tanpa CORS — addon OK),
+// gofile (JSON downloadPage), tmpfiles (raw? HTML — hanya darurat).
+// 0x0.st & file.io & temp.sh DITOLAK hasil audit (mati / sekali-unduh / HTML).
+export const MANUAL_SITES = [
+  { label: 'litterbox.catbox.moe', url: 'https://litterbox.catbox.moe/', note: '1GB · 1–72 jam · link langsung' },
+  { label: 'catbox.moe', url: 'https://catbox.moe/', note: '200MB · permanen · link langsung' },
+  { label: 'gofile.io', url: 'https://gofile.io/upload', note: 'besar · link via halaman' },
+  { label: 'tmpfiles.org', url: 'https://tmpfiles.org/', note: '100MB · 7 hari' }
+];
+
 // Durasi yang tersedia di UI. `time` = parameter API litterbox.
 // Litterbox hanya menerima 1h/12h/24h/72h — jangan tambah nilai lain.
 export const TEMP_DURATIONS = [

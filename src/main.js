@@ -17,7 +17,7 @@ import './styles/sticky.css';  // v1.17.0: strip sticky Waktu Shalat & Puasa (pa
 import { getSession, onAuthChange, handleOAuthCallback } from './auth.js';
 import { pullFromCloud, subscribeRealtime, unsubscribeRealtime, processSyncQueue, createFileItem, cleanupExpiredTempItems } from './sync.js';
 // v1.18.0: label durasi untuk picker tujuan upload sementara
-import { TEMP_DURATIONS } from './lib/temp-upload.js';
+import { TEMP_DURATIONS, TEMP_HOST_LABEL, TEMP_HOST_MANUAL, MANUAL_TEMP_DURATION, MANUAL_SITES, tempExpiresAt } from './lib/temp-upload.js';
 // v1.20.0: klasifikasi file 1:1 addon (teks + Office + gambar + arsip)
 import { detectFileKind, rejectHintFor, kindIcon, formatBytes, FILE_ACCEPT_ATTR, MAX_TEXT_UPLOAD_BYTES, MAX_BINARY_UPLOAD_BYTES, MAX_TEMP_UPLOAD_BYTES } from './lib/file-kinds.js';
 import { renderLogin, renderForgotPassword, renderResetPassword } from './views/login.js';
@@ -386,12 +386,37 @@ function openFabMenu() {
   });
 }
 
+// v1.21.0: perangkap error global — error JS yang dulu bikin tombol mati
+// diam-diam kini tampil sebagai toast + tetap tercatat di console.
+window.addEventListener('error', (e) => {
+  const msg = (e && e.message) || 'unknown error';
+  try {
+    let t = document.getElementById('rfErrToast');
+    if (!t) { t = document.createElement('div'); t.id = 'rfErrToast'; t.className = 'toast'; document.body.appendChild(t); }
+    t.textContent = '⚠ Error: ' + msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 5000);
+  } catch (_) { /* jangan error di dalam penangkap error */ }
+});
+window.addEventListener('unhandledrejection', (e) => {
+  const msg = (e && e.reason && (e.reason.message || e.reason)) || 'unknown error';
+  try {
+    let t = document.getElementById('rfErrToast');
+    if (!t) { t = document.createElement('div'); t.id = 'rfErrToast'; t.className = 'toast'; document.body.appendChild(t); }
+    t.textContent = '⚠ Gagal: ' + msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 5000);
+  } catch (_) {}
+});
+
 // v1.13.0: Upload File — modal standar (mirror addon saveFileUploadSheet)
 // v1.20.0: samakan addon — teks + kode (2MB) + PDF/Office/gambar/arsip (10MB DB / 1GB temp)
 // v1.18.0: DUAL DESTINATION — pilihan tujuan ☁️ Database (permanen) |
 // ⏳ Sementara (litterbox.catbox.moe, durasi 1 jam–3 hari, item hilang
 // otomatis dari vault saat kedaluwarsa — dihapus oleh cleanupExpiredTempItems
 // di PWA + addon, sinkron antar device). Alur isi file tidak berubah.
+// v1.21.0: TRIPLE DESTINATION — tambah 🔗 Manual: user upload sendiri di
+// situs luar (klik → tab baru), lalu tempel URL. Vault manual TTL 72 jam.
 function openFileUploadSheet() {
   const durOptions = TEMP_DURATIONS.map(d => `<option value="${d.id}"${d.id === '72h' ? ' selected' : ''}>${d.label}</option>`).join('');
   const sheet = document.createElement('div');
@@ -410,10 +435,20 @@ function openFileUploadSheet() {
         <div id="fileDestRow" style="display:flex;gap:8px;margin:4px 0 6px">
           <button type="button" id="fileDestDb" style="flex:1;padding:10px 6px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;font-weight:600;outline:2px solid #6366f1">☁️ Database</button>
           <button type="button" id="fileDestTemp" style="flex:1;padding:10px 6px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;font-weight:600;opacity:.55">⏳ Sementara</button>
+          <button type="button" id="fileDestManual" style="flex:1;padding:10px 6px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;font-weight:600;opacity:.55">🔗 Manual</button>
         </div>
         <div id="fileTempDurRow" style="display:none;margin:4px 0 6px">
           <label style="font-size:12px;font-weight:600;color:var(--text-muted)">Batas waktu <span style="font-weight:400">(file + item di vault hilang saat habis)</span></label>
           <select id="fileTempDur" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin:4px 0 0;font-size:14px;background:var(--surface);color:var(--text)">${durOptions}</select>
+        </div>
+        <div id="fileManualRow" style="display:none;margin:4px 0 6px;border:1px solid var(--border);border-radius:10px;padding:10px;background:var(--surface)">
+          <div style="font-size:12px;font-weight:600;margin-bottom:6px">🌐 Upload manual — pilih situs, upload di tab baru, lalu tempel URL di bawah</div>
+          <div id="fileManualSites" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
+          <label style="font-size:12px;font-weight:600;color:var(--text-muted)">URL file <span style="font-weight:400">(dari situs temp)</span></label>
+          <input type="url" id="fileManualUrl" placeholder="https://..." style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin:4px 0 6px;font-size:14px;background:var(--surface);color:var(--text)">
+          <label style="font-size:12px;font-weight:600;color:var(--text-muted)">Nama file <span style="font-weight:400">(opsional — otomatis dari URL bila kosong)</span></label>
+          <input type="text" id="fileManualName" placeholder="mis. laporan.pdf" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin:4px 0 0;font-size:14px;background:var(--surface);color:var(--text)">
+          <div style="font-size:11px;color:var(--text-muted);margin-top:6px">Vault manual hilang otomatis <b>3 hari</b> setelah disimpan (terlepas dari masa simpan situs).</div>
         </div>
         <div id="fileDestNote" style="font-size:11px;color:var(--text-muted);margin:0 0 8px">☁️ Disimpan permanen ke database Supabase (perilaku lama).</div>
         <div id="fileDropzone" style="border:2px dashed var(--border-strong);border-radius:12px;padding:32px 16px;text-align:center;cursor:pointer;transition:border-color 0.2s,background 0.2s">
@@ -448,25 +483,68 @@ function openFileUploadSheet() {
 
   function closeSheet() { sheet.remove(); }
 
-  // v1.18.0: Toggle tujuan simpan — Database (permanen) / Sementara (litterbox)
-  let _dest = 'db';
-  const destDbBtn = sheet.querySelector('#fileDestDb');
-  const destTempBtn = sheet.querySelector('#fileDestTemp');
-  const tempDurRow = sheet.querySelector('#fileTempDurRow');
-  const destNote = sheet.querySelector('#fileDestNote');
-  function _paintDest() {
-    const isDb = _dest === 'db';
-    destDbBtn.style.opacity = isDb ? '1' : '.55';
-    destDbBtn.style.outline = isDb ? '2px solid #6366f1' : 'none';
-    destTempBtn.style.opacity = isDb ? '.55' : '1';
-    destTempBtn.style.outline = isDb ? 'none' : '2px solid #f59e0b';
-    tempDurRow.style.display = isDb ? 'none' : '';
-    destNote.textContent = isDb
-      ? '☁️ Disimpan permanen ke database Supabase — teks maks 2MB, binary maks 10MB.'
-      : '⏳ File di-upload ke litterbox (catbox.moe) — URL publik (bisa dibuka AI chat). Teks maks 2MB, binary maks 1GB. Setelah batas waktu habis, item ini hilang OTOMATIS dari vault di semua device.';
+  // v1.21.0: helper defensif — referensi elemen diambil SEKALI di awal.
+  // Kalau markup berubah dan ID hilang, sheet gagal eksplisit (toast jelas),
+  // bukan tombol mati diam-diam seperti insiden v1.20.3.
+  function reqEl(id) {
+    const el = sheet.querySelector('#' + id);
+    if (!el) throw new Error('sheet rusak: #' + id + ' tidak ketemu');
+    return el;
   }
-  destDbBtn.addEventListener('click', () => { _dest = 'db'; _paintDest(); });
-  destTempBtn.addEventListener('click', () => { _dest = 'temp'; _paintDest(); });
+
+  // v1.18.0: Toggle tujuan simpan — Database (permanen) / Sementara (litterbox)
+  // v1.21.0: + Manual (URL tempel). Semua listener dipasang SEKALI di sini.
+  let _dest = 'db';
+  let ui = null;
+  try {
+    ui = {
+      db: reqEl('fileDestDb'), temp: reqEl('fileDestTemp'), manual: reqEl('fileDestManual'),
+      durRow: reqEl('fileTempDurRow'), dur: reqEl('fileTempDur'),
+      manualRow: reqEl('fileManualRow'), sites: reqEl('fileManualSites'),
+      manualUrl: reqEl('fileManualUrl'), manualName: reqEl('fileManualName'),
+      note: reqEl('fileDestNote'), dropzone: reqEl('fileDropzone'),
+      preview: reqEl('filePreview'), save: reqEl('fileSave'), cancel: reqEl('fileCancel')
+    };
+    // Daftar situs dirender SEKALI (bukan di tiap repaint — dulu di _paintDest).
+    ui.sites.innerHTML = MANUAL_SITES.map(s =>
+      '<a href="' + s.url + '" target="_blank" rel="noopener" title="' + s.note + '" style="font-size:11px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);text-decoration:none;color:var(--text)">'
+      + s.label + '</a>').join('');
+  } catch (e) {
+    sheet.remove();
+    alert('⚠ Sheet upload rusak: ' + e.message);
+    throw e;
+  }
+  function isManualUrlOk() {
+    return /^https:\/\//i.test((ui.manualUrl.value || '').trim());
+  }
+  function updateSaveState() {
+    if (_dest === 'manual') { ui.save.disabled = !isManualUrlOk(); return; }
+    ui.save.disabled = !(_fileIsBinary ? _fileBlob : _fileContent);
+  }
+  function _paintDest() {
+    const isDb = _dest === 'db', isTemp = _dest === 'temp', isManual = _dest === 'manual';
+    ui.db.style.opacity = isDb ? '1' : '.55';
+    ui.db.style.outline = isDb ? '2px solid #6366f1' : 'none';
+    ui.temp.style.opacity = isTemp ? '1' : '.55';
+    ui.temp.style.outline = isTemp ? '2px solid #f59e0b' : 'none';
+    ui.manual.style.opacity = isManual ? '1' : '.55';
+    ui.manual.style.outline = isManual ? '2px solid #10b981' : 'none';
+    ui.durRow.style.display = isTemp ? '' : 'none';
+    ui.manualRow.style.display = isManual ? '' : 'none';
+    ui.dropzone.style.display = isManual ? 'none' : '';
+    if (!isManual) ui.preview.style.display = (_fileIsBinary || _fileContent) ? '' : 'none';
+    else ui.preview.style.display = 'none';
+    ui.note.textContent = isDb
+      ? '☁️ Disimpan permanen ke database Supabase — teks maks 2MB, binary maks 10MB.'
+      : isTemp
+        ? '⏳ File di-upload ke litterbox (catbox.moe) — URL publik (bisa dibuka AI chat). Teks maks 2MB, binary maks 1GB. Setelah batas waktu habis, item ini hilang OTOMATIS dari vault di semua device.'
+        : '🔗 Manual: upload di situs di atas (tab baru), lalu tempel URL. Vault manual hilang otomatis 3 hari.';
+    updateSaveState();
+  }
+  ui.db.addEventListener('click', () => { _dest = 'db'; _paintDest(); });
+  ui.temp.addEventListener('click', () => { _dest = 'temp'; _paintDest(); });
+  ui.manual.addEventListener('click', () => { _dest = 'manual'; _paintDest(); });
+  ui.manualUrl.addEventListener('input', updateSaveState);
   _paintDest();
 
   // v1.20.0: deteksi 1:1 addon (detectFileKind) — teks + Office + gambar + arsip.
@@ -515,7 +593,7 @@ function openFileUploadSheet() {
       previewText.textContent = text.slice(0, 500) + (text.length > 500 ? '\n... (' + text.length + ' chars)' : '');
     }
     box.style.display = '';
-    sheet.querySelector('#fileSave').disabled = false;
+    updateSaveState();
     const titleEl = sheet.querySelector('#fileTitle');
     if (!titleEl.value.trim()) titleEl.value = file.name.replace(/\.[^.]+$/, '').slice(0, 60);
   }
@@ -530,14 +608,50 @@ function openFileUploadSheet() {
   sheet.querySelector('.sheet-backdrop').addEventListener('click', closeSheet);
 
   sheet.querySelector('#fileSave').addEventListener('click', async () => {
-    if (!_fileIsBinary && !_fileContent) { alert('Pilih file dulu'); return; }
-    if (_fileIsBinary && !_fileBlob) { alert('Pilih file dulu'); return; }
     const user = window.__rfUser;
     if (!user) { alert('Belum login'); return; }
     const title = (sheet.querySelector('#fileTitle').value || '').trim() || _fileName;
     const tags = (sheet.querySelector('#fileTags').value || '').trim();
     const tagList = tags ? tags.split(',').map(s => s.trim()).filter(Boolean) : ['file', _fileKind];
     const btn = sheet.querySelector('#fileSave');
+    // v1.21.0: cabang Manual dicek DULU — tidak butuh file terpilih.
+    if (_dest === 'manual') {
+      const manualUrl = (ui.manualUrl.value || '').trim();
+      if (!/^https:\/\//i.test(manualUrl)) { alert('⚠ URL harus diawali https://'); return; }
+      let mName = (ui.manualName.value || '').trim() || manualUrl.split('/').pop().split('?')[0] || 'file';
+      try { mName = decodeURIComponent(mName); } catch (e) {}
+      if (!mName.includes('.')) mName += '.bin';
+      const mInfo = detectFileKind({ name: mName }) || { kind: 'bin', mime: 'application/octet-stream', binary: true };
+      btn.textContent = '⏳ Menyimpan...'; btn.disabled = true;
+      try {
+        const result = await createFileItem(user, {
+          title: title || mName,
+          body: '',
+          tags: tagList.length ? tagList : ['file', mInfo.kind],
+          source: {
+            kind: mInfo.kind, mime: mInfo.mime || 'application/octet-stream',
+            fileName: mName, size: 0, isBinary: !!mInfo.binary,
+            uploadedFrom: 'pwa-upload-manual', capturedAt: new Date().toISOString(),
+            tempHost: TEMP_HOST_MANUAL, tempUrl: manualUrl,
+            tempExpiresAt: tempExpiresAt(MANUAL_TEMP_DURATION), tempDuration: MANUAL_TEMP_DURATION
+          }
+        }, { destination: 'manual' });
+        if (result.ok) {
+          closeSheet();
+          navigateTo('vault');
+          setTimeout(() => alert('🔗 Manual tersimpan — hilang otomatis 3 hari dari vault'), 100);
+        } else {
+          alert('⚠ Gagal simpan manual: ' + (result.error || 'unknown'));
+          btn.textContent = 'Simpan File'; btn.disabled = false;
+        }
+      } catch (e) {
+        alert('⚠ Error: ' + e.message);
+        btn.textContent = 'Simpan File'; btn.disabled = false;
+      }
+      return;
+    }
+    if (!_fileIsBinary && !_fileContent) { alert('Pilih file dulu'); return; }
+    if (_fileIsBinary && !_fileBlob) { alert('Pilih file dulu'); return; }
     btn.textContent = '⏳ Menyimpan...'; btn.disabled = true;
     try {
       // v1.20.0: validasi ulang 1:1 addon — teks 2MB (semua tujuan), binary 10MB DB / 1GB temp.
