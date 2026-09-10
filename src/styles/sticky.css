@@ -76,7 +76,7 @@
   max-height: 0; overflow: hidden;
   transition: max-height 0.25s ease, margin 0.25s ease;
 }
-.rf-sticky.open .rf-sticky-detail { max-height: 460px; margin-top: 8px; }
+.rf-sticky.open .rf-sticky-detail { max-height: 70vh; margin-top: 8px; overflow-y: auto; }
 
 .rf-sticky-detail-in {
   background: rgba(255, 255, 255, 0.96);
@@ -149,4 +149,61 @@
 .prayer-format-select {
   padding: 7px 10px; border: 1px solid var(--border); border-radius: 10px;
   background: var(--surface); color: var(--text); font-size: 13px;
+}
+
+/* ===== v1.19.0: Ngaji & Olahraga (collapsible ala addon <details>) ===== */
+.rf-habit-sec { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+.rf-habit-details {
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg); overflow: hidden;
+}
+.rf-habit-details summary {
+  cursor: pointer; list-style: none;
+  padding: 9px 11px; font-size: 12.5px; color: var(--text);
+  display: flex; align-items: center; gap: 6px;
+}
+.rf-habit-details summary::-webkit-details-marker { display: none; }
+.rf-habit-details summary::after {
+  content: '▾'; margin-left: auto; color: #a49d8f; font-size: 12px;
+}
+.rf-habit-details:not([open]) summary::after { content: '▸'; }
+.rf-habit-details summary b { font-variant-numeric: tabular-nums; }
+.rf-habit-body { padding: 0 11px 11px; display: flex; flex-direction: column; gap: 8px; }
+.rf-habit-counter { display: flex; gap: 8px; }
+.rf-habit-btn {
+  flex: 1; padding: 8px 6px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--surface);
+  color: var(--text); font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.rf-habit-btn.primary { background: var(--iris-tint, #f1ecfe); border-color: var(--primary); color: var(--primary); }
+.rf-habit-links { display: flex; flex-wrap: wrap; gap: 6px; }
+.rf-habit-link {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11.5px; text-decoration: none;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 999px; padding: 5px 6px 5px 10px;
+  color: var(--text); max-width: 100%;
+}
+.rf-habit-link span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rf-habit-del {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: none; background: var(--bg); color: #a49d8f;
+  font-size: 9px; line-height: 1; cursor: pointer; flex: none;
+}
+.rf-habit-empty { font-size: 11px; color: var(--text-muted); }
+.rf-habit-add {
+  align-self: flex-start; padding: 6px 10px; border-radius: 999px;
+  border: 1px dashed var(--border-strong, var(--border));
+  background: transparent; color: var(--text-muted);
+  font-size: 11.5px; cursor: pointer;
+}
+.rf-habit-reset {
+  align-self: center; border: none; background: transparent;
+  color: var(--text-muted); font-size: 11px; cursor: pointer; padding: 4px 8px;
+}
+/* Layar sempit: bar boleh scroll horizontal (Ngaji+Olahraga+Shalat muat semua) */
+@media (max-width: 480px) {
+  .rf-sticky-bar { overflow-x: auto; scrollbar-width: none; }
+  .rf-sticky-bar::-webkit-scrollbar { display: none; }
+  .rf-sticky-cell { flex: none; }
 }

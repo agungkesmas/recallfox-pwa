@@ -417,7 +417,7 @@ function openFileUploadSheet() {
           <div style="font-size:40px;margin-bottom:8px">📄</div>
           <div style="font-weight:600;color:var(--text)">Klik untuk pilih file</div>
           <div style="font-size:12px;margin-top:4px;color:var(--text-muted)">atau drag & drop</div>
-          <div style="font-size:11px;margin-top:4px;color:var(--text-subtle)">Format: .md, .txt, .json, .html, .csv, .yaml (max 2MB)</div>
+          <div style="font-size:11px;margin-top:4px;color:var(--text-subtle)">Format: .md, .txt, .json, .html, .csv, .yaml (maks 2MB Database · 1GB Sementara)</div>
         </div>
         <input type="file" id="fileInputHidden" accept=".md,.markdown,.txt,.json,.html,.htm,.csv,.yaml,.yml" style="display:none">
         <div id="filePreview" style="display:none;margin:12px 0">
@@ -446,7 +446,10 @@ function openFileUploadSheet() {
     '.yml': { kind: 'yaml', mime: 'text/yaml' }
   };
   const MAX_BYTES = 2 * 1024 * 1024;
+  // v1.19.0: maksimalkan litterbox ke batas server — 1GB (Database tetap 2MB)
+  const MAX_TEMP_BYTES = 1024 * 1024 * 1024;
   let _fileContent = null, _fileName = '', _fileKind = null, _fileMime = 'text/plain';
+  let _fileSize = 0;
 
   const dropzone = sheet.querySelector('#fileDropzone');
   const fileInput = sheet.querySelector('#fileInputHidden');
@@ -467,8 +470,8 @@ function openFileUploadSheet() {
     destTempBtn.style.outline = isDb ? 'none' : '2px solid #f59e0b';
     tempDurRow.style.display = isDb ? 'none' : '';
     destNote.textContent = isDb
-      ? '☁️ Disimpan permanen ke database Supabase (perilaku lama).'
-      : '⏳ File di-upload ke litterbox (catbox.moe) — URL publik (bisa dibuka AI chat). Setelah batas waktu habis, item ini hilang OTOMATIS dari vault di semua device.';
+      ? '☁️ Disimpan permanen ke database Supabase (perilaku lama, maks 2MB).'
+      : '⏳ File di-upload ke litterbox (catbox.moe) — URL publik (bisa dibuka AI chat). Maks 1GB. Setelah batas waktu habis, item ini hilang OTOMATIS dari vault di semua device.';
   }
   destDbBtn.addEventListener('click', () => { _dest = 'db'; _paintDest(); });
   destTempBtn.addEventListener('click', () => { _dest = 'temp'; _paintDest(); });
@@ -483,10 +486,12 @@ function openFileUploadSheet() {
   async function handleFile(file) {
     const info = detectKind(file.name);
     if (!info) { alert('Format tidak didukung: ' + file.name); return; }
-    if (file.size > MAX_BYTES) { alert('File terlalu besar (max 2MB)'); return; }
+    // v1.19.0: validasi sesuai tujuan — Database 2MB, Sementara 1GB (batas maksimal litterbox)
+    const limit = _dest === 'temp' ? MAX_TEMP_BYTES : MAX_BYTES;
+    if (file.size > limit) { alert('File terlalu besar (maks ' + (_dest === 'temp' ? '1GB Sementara' : '2MB Database') + ')'); return; }
     const text = await file.text();
     if (!text || text.length === 0) { alert('File kosong'); return; }
-    _fileContent = text; _fileName = file.name; _fileKind = info.kind; _fileMime = info.mime;
+    _fileContent = text; _fileName = file.name; _fileKind = info.kind; _fileMime = info.mime; _fileSize = file.size;
     const meta = sheet.querySelector('#filePreviewMeta');
     const preview = sheet.querySelector('#filePreviewText');
     const box = sheet.querySelector('#filePreview');
@@ -519,7 +524,10 @@ function openFileUploadSheet() {
     btn.textContent = '⏳ Menyimpan...'; btn.disabled = true;
     try {
       // v1.18.0: Dual destination — temp = litterbox + durasi dari dropdown
+      // v1.19.0: validasi ulang sesuai tujuan — Database 2MB, Sementara 1GB
       const isTemp = _dest === 'temp';
+      const saveLimit = isTemp ? MAX_TEMP_BYTES : MAX_BYTES;
+      if (_fileSize > saveLimit) { alert('⚠ File terlalu besar untuk tujuan ' + (isTemp ? '⏳ Sementara (maks 1GB)' : '☁️ Database (maks 2MB)')); btn.textContent = 'Simpan File'; btn.disabled = false; return; }
       const result = await createFileItem(user, {
         title, body: _fileContent, tags: tagList,
         source: { kind: _fileKind, mime: _fileMime, fileName: _fileName, size: _fileContent.length, uploadedFrom: isTemp ? 'pwa-upload-temp' : 'pwa-upload', capturedAt: new Date().toISOString() }
