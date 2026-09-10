@@ -17,7 +17,7 @@ import './styles/sticky.css';  // v1.17.0: strip sticky Waktu Shalat & Puasa (pa
 import { getSession, onAuthChange, handleOAuthCallback } from './auth.js';
 import { pullFromCloud, subscribeRealtime, unsubscribeRealtime, processSyncQueue, createFileItem, cleanupExpiredTempItems } from './sync.js';
 // v1.18.0: label durasi untuk picker tujuan upload sementara
-import { TEMP_DURATIONS, TEMP_HOST_LABEL, TEMP_HOST_MANUAL, MANUAL_TEMP_DURATION, MANUAL_SITES, tempExpiresAt } from './lib/temp-upload.js';
+import { TEMP_DURATIONS } from './lib/temp-upload.js';
 // v1.20.0: klasifikasi file 1:1 addon (teks + Office + gambar + arsip)
 import { detectFileKind, rejectHintFor, kindIcon, formatBytes, FILE_ACCEPT_ATTR, MAX_TEXT_UPLOAD_BYTES, MAX_BINARY_UPLOAD_BYTES, MAX_TEMP_UPLOAD_BYTES } from './lib/file-kinds.js';
 import { renderLogin, renderForgotPassword, renderResetPassword } from './views/login.js';
@@ -410,27 +410,17 @@ function openFileUploadSheet() {
         <div id="fileDestRow" style="display:flex;gap:8px;margin:4px 0 6px">
           <button type="button" id="fileDestDb" style="flex:1;padding:10px 6px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;font-weight:600;outline:2px solid #6366f1">☁️ Database</button>
           <button type="button" id="fileDestTemp" style="flex:1;padding:10px 6px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;font-weight:600;opacity:.55">⏳ Sementara</button>
-          <button type="button" id="fileDestManual" style="flex:1;padding:10px 6px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:13px;font-weight:600;opacity:.55">🔗 Manual</button>
         </div>
         <div id="fileTempDurRow" style="display:none;margin:4px 0 6px">
           <label style="font-size:12px;font-weight:600;color:var(--text-muted)">Batas waktu <span style="font-weight:400">(file + item di vault hilang saat habis)</span></label>
           <select id="fileTempDur" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin:4px 0 0;font-size:14px;background:var(--surface);color:var(--text)">${durOptions}</select>
-        </div>
-        <div id="manualRow" style="display:none;margin:4px 0 6px;border:1px solid var(--border);border-radius:8px;padding:10px;background:var(--surface-2)">
-          <div style="font-size:11px;font-weight:600;margin-bottom:6px">🌐 Upload manual — pilih situs, upload di tab baru, lalu tempel URL</div>
-          <div id="manualSites" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
-          <label style="font-size:11px;font-weight:600">URL file</label>
-          <input type="url" id="manualUrl" placeholder="https://..." style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin:4px 0 6px;font-size:14px;background:var(--surface);color:var(--text)">
-          <label style="font-size:11px;font-weight:600">Nama file (opsional)</label>
-          <input type="text" id="manualName" placeholder="mis. laporan.pdf" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin:4px 0 0;font-size:14px;background:var(--surface);color:var(--text)">
-          <div style="font-size:10px;color:var(--text-muted);margin-top:4px">Vault manual hilang otomatis <b>3 hari</b> setelah disimpan.</div>
         </div>
         <div id="fileDestNote" style="font-size:11px;color:var(--text-muted);margin:0 0 8px">☁️ Disimpan permanen ke database Supabase (perilaku lama).</div>
         <div id="fileDropzone" style="border:2px dashed var(--border-strong);border-radius:12px;padding:32px 16px;text-align:center;cursor:pointer;transition:border-color 0.2s,background 0.2s">
           <div style="font-size:40px;margin-bottom:8px">📄</div>
           <div style="font-weight:600;color:var(--text)">Klik untuk pilih file</div>
           <div style="font-size:12px;margin-top:4px;color:var(--text-muted)">atau drag & drop</div>
-          <div style="font-size:11px;margin-top:4px;color:var(--text-subtle)">Teks + kode (maks 2MB)<br>PDF, Office, gambar, arsip .zip/.rar/.7z/.tar (maks 10MB Database · 100MB Sementara)</div>
+          <div style="font-size:11px;margin-top:4px;color:var(--text-subtle)">Teks + kode (maks 2MB)<br>PDF, Office, gambar, arsip .zip/.rar/.7z/.tar (maks 10MB Database · 1GB Sementara)</div>
         </div>
         <input type="file" id="fileInputHidden" accept="${FILE_ACCEPT_ATTR}" style="display:none">
         <div id="filePreview" style="display:none;margin:12px 0">
@@ -464,34 +454,19 @@ function openFileUploadSheet() {
   const destTempBtn = sheet.querySelector('#fileDestTemp');
   const tempDurRow = sheet.querySelector('#fileTempDurRow');
   const destNote = sheet.querySelector('#fileDestNote');
-  const destManualBtn = sheet.querySelector('#fileDestManual');
-  const manualRow = sheet.querySelector('#manualRow');
   function _paintDest() {
-    const isDb = _dest === 'db', isTemp = _dest === 'temp', isManual = _dest === 'manual';
+    const isDb = _dest === 'db';
     destDbBtn.style.opacity = isDb ? '1' : '.55';
     destDbBtn.style.outline = isDb ? '2px solid #6366f1' : 'none';
-    destTempBtn.style.opacity = isTemp ? '1' : '.55';
-    destTempBtn.style.outline = isTemp ? '2px solid #f59e0b' : 'none';
-    destManualBtn.style.opacity = isManual ? '1' : '.55';
-    destManualBtn.style.outline = isManual ? '2px solid #10b981' : 'none';
-    tempDurRow.style.display = isTemp ? '' : 'none';
-    manualRow.style.display = isManual ? '' : 'none';
-    dropzone.style.display = isManual ? 'none' : '';
-    sheet.querySelector('#filePreview').style.display = isManual ? 'none' : sheet.querySelector('#filePreview').style.display;
-    const sitesBox = sheet.querySelector('#manualSites');
-    if (sitesBox && sitesBox.childElementCount === 0) {
-      sitesBox.innerHTML = MANUAL_SITES.map(s => '<a href="' + s.url + '" target="_blank" rel="noopener" style="font-size:11px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);text-decoration:none;color:var(--text)">' + s.label + '</a>').join('');
-    }
-    if (isDb) destNote.textContent = '☁️ Disimpan permanen ke database Supabase — teks maks 2MB, binary maks 10MB.';
-    else if (isTemp) destNote.textContent = '⏳ File di-upload ke ' + TEMP_HOST_LABEL + ' — URL publik (bisa dibuka AI chat). Teks maks 2MB, binary maks 100MB. Setelah batas waktu habis, item ini hilang OTOMATIS dari vault di semua device.';
-    else destNote.textContent = '🔗 Manual: upload di situs di atas (tab baru), lalu tempel URL. Vault manual hilang otomatis 3 hari.';
-    const manualUrl = sheet.querySelector('#manualUrl');
-    if (manualUrl && isManual) sheet.querySelector('#fileSave').disabled = !manualUrl.value.trim();
+    destTempBtn.style.opacity = isDb ? '.55' : '1';
+    destTempBtn.style.outline = isDb ? 'none' : '2px solid #f59e0b';
+    tempDurRow.style.display = isDb ? 'none' : '';
+    destNote.textContent = isDb
+      ? '☁️ Disimpan permanen ke database Supabase — teks maks 2MB, binary maks 10MB.'
+      : '⏳ File di-upload ke litterbox (catbox.moe) — URL publik (bisa dibuka AI chat). Teks maks 2MB, binary maks 1GB. Setelah batas waktu habis, item ini hilang OTOMATIS dari vault di semua device.';
   }
   destDbBtn.addEventListener('click', () => { _dest = 'db'; _paintDest(); });
   destTempBtn.addEventListener('click', () => { _dest = 'temp'; _paintDest(); });
-  destManualBtn.addEventListener('click', () => { _dest = 'manual'; _paintDest(); sheet.querySelector('#fileSave').disabled = !sheet.querySelector('#manualUrl').value.trim(); });
-  sheet.querySelector('#manualUrl').addEventListener('input', () => { if (_dest === 'manual') sheet.querySelector('#fileSave').disabled = !sheet.querySelector('#manualUrl').value.trim(); });
   _paintDest();
 
   // v1.20.0: deteksi 1:1 addon (detectFileKind) — teks + Office + gambar + arsip.
@@ -565,29 +540,11 @@ function openFileUploadSheet() {
     const btn = sheet.querySelector('#fileSave');
     btn.textContent = '⏳ Menyimpan...'; btn.disabled = true;
     try {
-      // v1.20.0: validasi ulang 1:1 addon — teks 2MB (semua tujuan), binary 10MB DB / 100MB temp.
-      if (_dest === 'manual') {
-        const manualUrl = (sheet.querySelector('#manualUrl').value || '').trim();
-        const manualNameRaw = (sheet.querySelector('#manualName').value || '').trim();
-        if (!/^https:\/\//i.test(manualUrl)) { alert('⚠ URL harus diawali https://'); btn.textContent = 'Simpan File'; btn.disabled = false; return; }
-        let mName = manualNameRaw || manualUrl.split('/').pop().split('?')[0] || 'file';
-        try { mName = decodeURIComponent(mName); } catch (e) {}
-        if (!mName.includes('.')) mName += '.bin';
-        const mInfo = detectFileKind({ name: mName }) || { kind: 'bin', mime: 'application/octet-stream', binary: true };
-        const mTitle2 = title || mName;
-        const mTags2 = tagList.length ? tagList : ['file', mInfo.kind];
-        const mRow = await createFileItem(user, {
-          title: mTitle2, body: '', tags: mTags2,
-          source: { kind: mInfo.kind, mime: mInfo.mime || 'application/octet-stream', fileName: mName, size: 0, isBinary: !!mInfo.binary, uploadedFrom: 'pwa-manual', capturedAt: new Date().toISOString(), tempHost: TEMP_HOST_MANUAL, tempUrl: manualUrl, tempExpiresAt: tempExpiresAt(MANUAL_TEMP_DURATION), tempDuration: MANUAL_TEMP_DURATION }
-        }, { destination: 'manual' });
-        if (mRow && mRow.ok) { closeSheet(); navigateTo('vault'); setTimeout(() => alert('🔗 Manual tersimpan — hilang otomatis 3 hari'), 100); }
-        else { alert('⚠ Gagal simpan manual: ' + (mRow && mRow.error || 'unknown')); btn.textContent = 'Simpan File'; btn.disabled = false; }
-        return;
-      }
+      // v1.20.0: validasi ulang 1:1 addon — teks 2MB (semua tujuan), binary 10MB DB / 1GB temp.
       const isTemp = _dest === 'temp';
       const saveLimit = _fileIsBinary ? (isTemp ? MAX_TEMP_UPLOAD_BYTES : MAX_BINARY_UPLOAD_BYTES) : MAX_TEXT_UPLOAD_BYTES;
       if (_fileSize > saveLimit) {
-        alert('⚠ File terlalu besar untuk tujuan ' + (isTemp ? '⏳ Sementara (teks maks 2MB, binary maks 100MB)' : '☁️ Database (teks maks 2MB, binary maks 10MB)'));
+        alert('⚠ File terlalu besar untuk tujuan ' + (isTemp ? '⏳ Sementara (teks maks 2MB, binary maks 1GB)' : '☁️ Database (teks maks 2MB, binary maks 10MB)'));
         btn.textContent = 'Simpan File'; btn.disabled = false; return;
       }
       const saveOpts = isTemp ? { destination: 'temp', duration: sheet.querySelector('#fileTempDur').value || '72h' } : {};
