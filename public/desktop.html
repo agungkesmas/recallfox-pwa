@@ -3217,6 +3217,114 @@ try { tgZoom = ['kecil','sedang','besar'].includes(localStorage.getItem('rf-dt-t
 function tgZoomW(){ return tgZoom === 'kecil' ? 118 : tgZoom === 'besar' ? 260 : 170; }
 function tgThumbW(){ return tgZoom === 'kecil' ? 236 : tgZoom === 'besar' ? 520 : 360; }
 function tgSetZoom(z){ tgZoom = z; try { localStorage.setItem('rf-dt-tgzoom', z); } catch (e) {} tgPaintSelect(); }
+
+/* ----- v-kompres: preset kompresi hasil gabungan ala iLovePDF (3 tingkat) -----
+   extreme = paling kecil (96 DPI, JPEG 45%) · sedang = seimbang (150 DPI, JPEG 62%, default
+   seperti "Recommended" di iLovePDF) · none = tanpa kompres (salin vektor, perilaku lama).
+   Mesin: pdf.js render → canvas → JPEG → embed pdf-lib. Cover & pemisah TETAP vektor.
+   Hasil 100% offline; hanya berlaku utk halaman isi (bukan halaman UI aplikasi). */
+const TG_COMP = {
+  extreme: { dpi: 96,  q: 0.45, label: 'Ekstrem',        desc: 'paling kecil — buat kirim WA/email' },
+  sedang:  { dpi: 150, q: 0.62, label: 'Sedang',         desc: 'seimbang — direkomendasikan' },
+  none:    { dpi: 0,   q: 1,    label: 'Tanpa kompres',  desc: 'kualitas & teks asli utuh' }
+};
+let tgComp = 'sedang';
+try { const c = localStorage.getItem('rf-dt-tgcomp'); if (TG_COMP[c]) tgComp = c; } catch (e) {}
+function tgSetComp(c){ if (!TG_COMP[c]) return; tgComp = c; try { localStorage.setItem('rf-dt-tgcomp', c); } catch (e) {} }
+function tgCompHTML(){
+  const card = key => {
+    const c = TG_COMP[key], on = tgComp === key;
+    return '<div data-comp="' + key + '" style="flex:1;min-width:150px;cursor:pointer;border:1.5px solid ' + (on ? 'var(--primary)' : 'var(--border)') +
+      ';border-radius:10px;padding:9px 11px;background:' + (on ? 'var(--primary-soft,rgba(109,61,245,.09))' : 'transparent') + '">' +
+      '<div style="display:flex;align-items:center;gap:7px"><span style="font-size:14px">' + (key === 'extreme' ? '🔥' : key === 'sedang' ? '⚖️' : '📄') + '</span>' +
+      '<b style="font-size:12.5px;color:' + (on ? 'var(--primary)' : 'var(--text)') + '">' + c.label + '</b>' + (on ? '<span style="margin-left:auto;color:var(--primary);font-size:11px">●</span>' : '') + '</div>' +
+      '<div class="hint" style="margin-top:3px">' + c.desc + (c.dpi ? ' · ' + c.dpi + ' DPI' : '') + '</div></div>';
+  };
+  return '<div style="margin-top:14px;border:1px solid var(--border);border-radius:12px;padding:12px;background:var(--bg)">' +
+    '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b style="font-size:12px;letter-spacing:.06em">🗜 KOMPRESI HASIL</b>' +
+    '<span class="hint">ala iLovePDF — proses 100% di browser, tanpa upload</span></div>' +
+    '<div style="display:flex;gap:8px;margin-top:9px;flex-wrap:wrap">' + card('extreme') + card('sedang') + card('none') + '</div>' +
+    '<div class="hint" id="tgCompEst" style="margin-top:8px"></div>' +
+    '<div id="tgCompWarn" style="display:none;margin-top:6px;font-size:11.5px;line-height:1.5;color:#b45309;background:#fdf3e3;border:1px solid #f3ddb5;border-radius:8px;padding:7px 10px"></div>' +
+    '</div>';
+}
+/* Render 1 halaman → JPEG blob (utk estimasi & penggabungan). Ukuran halaman PDF = titik (72dpi). */
+async function tgPageJpeg(f, no, dpi, q){
+  const page = await f.doc.getPage(no);
+  const vp0 = page.getViewport({ scale: 1 });
+  let scale = dpi / 72;
+  const MAXPX = 4096;  /* pengaman kanvas utk format besar */
+  if (Math.max(vp0.width, vp0.height) * scale > MAXPX) scale = MAXPX / Math.max(vp0.width, vp0.height);
+  const vp = page.getViewport({ scale });
+  const cv = document.createElement('canvas');
+  cv.width = Math.max(1, Math.round(vp.width)); cv.height = Math.max(1, Math.round(vp.height));
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, cv.width, cv.height);
+  await page.render({ canvasContext: ctx, viewport: vp }).promise;
+  const blob = await new Promise((res, rej) => cv.toBlob(b => b ? res(b) : rej(new Error('toBlob gagal')), 'image/jpeg', q));
+  cv.width = 0; cv.height = 0;  /* lepaskan memori kanvas */
+  return { blob, w: vp0.width, h: vp0.height };
+}
+/* Deteksi teks asli (born-digital): sampel halaman pertama yg dicentang. Hasil dicache per berkas. */
+async function tgFileHasText(f){
+  if (f._hasTxt !== undefined) return f._hasTxt;
+  f._hasTxt = false;
+  try {
+    if (!f.doc) return false;
+    const first = f.chosen.size ? Math.min([...f.chosen].sort((a, b) => a - b)[0], f.pages || 1) : 1;
+    const page = await f.doc.getPage(first);
+    const tc = await page.getTextContent();
+    const chars = (tc.items || []).reduce((a, it) => a + String(it.str || '').replace(/\s+/g, '').length, 0);
+    f._hasTxt = chars > 40;
+  } catch (e) {}
+  return f._hasTxt;
+}
+async function tgFileHasTextAny(plan){ for (const x of plan) { if (await tgFileHasText(x)) return true; } return false; }
+/* Estimasi ukuran hasil + peringatan teks — tampil di blok kompresi (langkah berkas terakhir). */
+let tgEstSeq = 0;
+async function tgCompEstimate(){
+  const seq = ++tgEstSeq;
+  const estEl = $('#tgCompEst'), warnEl = $('#tgCompWarn');
+  if (!estEl) return;
+  const c = TG_COMP[tgComp];
+  const plan = TG.files.filter(x => x.chosen.size && !x.err);
+  const totalPick = plan.reduce((a, x) => a + x.chosen.size, 0);
+  if (!totalPick || !warnEl) return;
+  tgFileHasTextAny(plan).then(has => {
+    if (seq !== tgEstSeq) return;
+    const w = $('#tgCompWarn'); if (!w) return;
+    if (has && tgComp !== 'none') {
+      w.innerHTML = '⚠️ Ada berkas berisi <b>teks asli</b> — hasil kompres dijadikan gambar: teks tak bisa dicari/diseleksi. Pilih <b>Tanpa kompres</b> bila teks penting.';
+      w.style.display = 'block';
+    } else w.style.display = 'none';
+  });
+  /* perkiraan ukuran "sebelum": proporsi byte berkas × rasio halaman dipilih */
+  const estRaw = plan.reduce((a, x) => a + (x.bytes ? x.bytes.byteLength * x.chosen.size / Math.max(1, x.pages || x.chosen.size) : 0), 0);
+  if (tgComp === 'none') {
+    estEl.textContent = 'Perkiraan hasil: ≈ ' + fmtBytes(Math.round(estRaw) + 40 * 1024) + ' — halaman disalin utuh (vektor) + halaman pembuka/pemisah.';
+    return;
+  }
+  estEl.textContent = '⏳ Menghitung perkiraan ukuran…';
+  let est = 0, sampled = 0;
+  for (const x of plan) {
+    try {
+      if (!x.doc) continue;
+      const key = '_est' + c.dpi;
+      if (!x[key]) {
+        const first = Math.min([...x.chosen].sort((a, b) => a - b)[0], x.pages || 1);
+        const r = await tgPageJpeg(x, first, c.dpi, c.q);
+        x[key] = r.blob.size;
+      }
+      est += x[key] * x.chosen.size; sampled++;
+    } catch (e) {}
+  }
+  if (seq !== tgEstSeq) return;
+  const el2 = $('#tgCompEst'); if (!el2) return;
+  el2.textContent = sampled
+    ? 'Perkiraan hasil: ≈ ' + fmtBytes(Math.round(est) + 120 * 1024) + ' dari ' + totalPick + ' halaman (sampel ' + sampled + ' berkas × ' + c.dpi + ' DPI) — ukuran final tampil setelah digabung.'
+    : '';
+}
+function tgProgress(msg){ const b = $('#tgBody'); if (b) b.innerHTML = '<div class="tg-card"><h3>🔗 MENGGABUNG…</h3><p class="tg-sub">' + esc(msg) + '</p><div class="tg-loading">⏳ Proses 100% di browser — jangan tutup tab ini.</div></div>'; }
 const TU = { on: false, name: '', title: '', bytes: null, doc: null, pages: 0, order: [], out: null, cache: new Map() };
 const TR = { rows: [], target: '' };
 try { const t = JSON.parse(localStorage.getItem('rf-dt-rekons') || 'null'); if (t) { TR.rows = Array.isArray(t.rows) ? t.rows : []; TR.target = String(t.target || ''); } } catch (e) {}
@@ -3239,7 +3347,7 @@ function tgIdb(){
 }
 function tgDraftSave(){ clearTimeout(tgDraftT); tgDraftT = setTimeout(() => { tgDraftWrite().catch(() => {}); }, 800); }
 async function tgDraftWrite(){
-  const rec = { v: 1, savedAt: Date.now(), title: TG.title || '', cur: TG.cur || 0, stage: TG.stage,
+  const rec = { v: 1, savedAt: Date.now(), title: TG.title || '', cur: TG.cur || 0, stage: TG.stage, comp: tgComp,
     files: TG.files.map(f => ({ id: f.id, name: f.name, title: f.title, bytes: f.bytes, pages: f.pages || 0, chosen: [...(f.chosen || [])], err: f.err || null })) };
   const db = await tgIdb();
   await new Promise((res, rej) => { const tx = db.transaction(TG_DRAFT_STORE, 'readwrite'); tx.objectStore(TG_DRAFT_STORE).put(rec, TG_DRAFT_KEY); tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
@@ -3251,6 +3359,7 @@ async function tgDraftLoad(){
   TG.files = rec.files.map(f => ({ ...f, doc: null, chosen: new Set(f.chosen || []) }));
   TG.title = rec.title || ''; TG.cur = Math.min(rec.cur || 0, Math.max(0, TG.files.length - 1));
   TG.stage = (rec.stage === 'select') ? 'select' : 'manage';
+  if (rec.comp && TG_COMP[rec.comp]) tgComp = rec.comp;   /* v-kompres: preset ikut draf */
   TG.tabS = 'gabung'; TG.out = null;
   return true;
 }
@@ -3298,7 +3407,7 @@ function tgEmptyHTML(){
     '<p class="tg-sub">Satukan beberapa berkas PDF tapi <b>hanya halaman yang dicentang</b> dari tiap berkas — mis. dari 10 halaman ambil 3 halaman <i>rincian kwitansi</i> saja — lengkap dgn <b>halaman pembuka &amp; halaman pemisah antar berkas</b>. Alurnya langkah demi langkah: <b>satu berkas per layar</b>. 100% <b>offline</b>, tanpa server, tanpa login — tidak ada data yang dikirim ke mana pun.</p>' +
     '<div class="tg-drop" id="tgDrop">📎 Klik / seret berkas PDF ke sini (bisa banyak sekaligus)…</div>' +
     '<input type="file" id="tgPick" accept="application/pdf,.pdf" multiple style="display:none">' +
-    '<div class="tg-card" style="margin-top:12px;background:var(--bg)"><span style="font-size:12.5px;line-height:1.6">💡 <b>Alur:</b> pilih berkas → centang halaman berkas A → <b>Selanjutnya</b> → berkas B → … → <b>Gabungkan</b>. Koreksi kapan saja lewat <b>← Sebelumnya</b> atau <b>dropdown judul</b> di atas. Urutan berkas diatur di layar "Kelola daftar berkas".</span></div></div>';
+    '<div class="tg-card" style="margin-top:12px;background:var(--bg)"><span style="font-size:12.5px;line-height:1.6">💡 <b>Alur:</b> pilih berkas → centang halaman berkas A → <b>Selanjutnya</b> → berkas B → … → <b>Gabungkan</b>. Di langkah berkas terakhir ada pilihan <b>🗜 kompresi hasil</b> ala iLovePDF: <b>Ekstrem / Sedang / Tanpa kompres</b>. Koreksi kapan saja lewat <b>← Sebelumnya</b> atau <b>dropdown judul</b> di atas. Urutan berkas diatur di layar "Kelola daftar berkas".</span></div></div>';
 }
 function tgWireEmpty(){
   const drop = $('#tgDrop'), pick = $('#tgPick');
@@ -3412,6 +3521,7 @@ function tgPaintSelect(){
       return '<div class="tg-pg' + (on ? ' on' : '') + '" data-no="' + no + '">' + bodyEl +
         '<span class="tg-pn">' + no + '</span><span class="tg-ck">' + (on ? '✓' : '') + '</span></div>';
     }).join('') : '<div class="tg-empty">' + (f.err ? esc(f.err) : 'Membuka PDF…') + '</div>') + '</div>' +
+    (last ? tgCompHTML() : '') +
     '<div class="tg-actions" style="margin-top:14px;justify-content:space-between">' +
     '<span style="display:flex;gap:8px"><button class="tg-btn" id="tgPrev"' + (TG.cur === 0 ? ' disabled' : '') + '>← Sebelumnya</button>' +
     '<button class="tg-btn" id="tgAddMore" title="Tambah berkas lagi (bertahap)">+ Berkas</button></span>' +
@@ -3448,6 +3558,8 @@ function tgPaintSelect(){
       else if (e.key === 'Enter' || e.key === ' ') tgLightToggle();
     }, true);
   }
+  body.querySelectorAll('[data-comp]').forEach(el => el.onclick = () => { tgSetComp(el.dataset.comp); tgPaintSelect(); });
+  if (last) tgCompEstimate();
   $('#tgPickSel').onchange = e => { const fs = [...e.target.files]; e.target.value = ''; tgAddFiles(fs); };
   const _tam = $('#tgAddMore'); if (_tam) _tam.onclick = () => $('#tgPickSel').click();
   $('#tgNextSel').onclick = () => {
@@ -3522,6 +3634,7 @@ async function tgMerge(){
   if (noSel >= 0) { TG.cur = noSel; tgPaintSelect(); toast('Centang minimal 1 halaman di "' + (TG.files[noSel].title || TG.files[noSel].name) + '"'); return; }
   if (!TG.files.some(f => f.chosen.size)) { toast('Belum ada halaman yang dicentang'); return; }
   try {
+    tgProgress('Menyiapkan modul PDF…');
     await rfEnsurePdf();
     const { PDFDocument, StandardFonts, rgb } = PDFLib;
     const out = await PDFDocument.create();
@@ -3552,18 +3665,41 @@ async function tgMerge(){
       const { f, idx } = plan[i];
       const src = await PDFDocument.load(f.bytes.slice(0), { ignoreEncryption: true });
       const srcIdx = idx.map(n => n - 1);   /* UI 1-based → pdf-lib 0-based */
+      if (tgComp !== 'none' && !f.doc) { try { f.doc = await pdfjsLib.getDocument({ data: f.bytes.slice(0) }).promise; f.pages = f.doc.numPages; } catch (e) { f.doc = null; } }
       const sp = out.addPage([W, H]);
       sp.drawRectangle({ x: 0, y: 0, width: 16, height: H, color: P });
       sp.drawText('BAGIAN ' + (i + 1) + ' / ' + plan.length, { x: 52, y: H - 110, size: 14, font: fB, color: P });
       sp.drawText(tgPdfTxt(f.title || f.name).slice(0, 44), { x: 52, y: H - 152, size: 23, font: fB });
       sp.drawText('Halaman terpilih: ' + idx.length + ' dari ' + (f.pages || idx.length), { x: 52, y: H - 180, size: 12, font: fR, color: G });
       sp.drawRectangle({ x: 52, y: H - 200, width: 120, height: 3, color: P });
-      const pages = await out.copyPages(src, srcIdx);
-      pages.forEach(p => out.addPage(p));
+      if (tgComp !== 'none' && f.doc) {
+        /* v-kompres: rasterize halaman terpilih → JPEG → embed (cover & pemisah tetap vektor) */
+        const cp = TG_COMP[tgComp];
+        for (let k = 0; k < idx.length; k++) {
+          tgProgress('Menggabung bagian ' + (i + 1) + '/' + plan.length + ' — halaman ' + (k + 1) + '/' + idx.length + ' (' + cp.label + ')…');
+          try {
+            const r = await tgPageJpeg(f, idx[k], cp.dpi, cp.q);
+            const img = await out.embedJpg(new Uint8Array(await r.blob.arrayBuffer()));
+            const pp = out.addPage([r.w, r.h]);
+            pp.drawImage(img, { x: 0, y: 0, width: r.w, height: r.h });
+          } catch (e2) {
+            console.warn('[tgMerge] raster gagal hal ' + idx[k] + ', salin vektor', e2);
+            const pv = await out.copyPages(src, [idx[k] - 1]); pv.forEach(p2 => out.addPage(p2));
+          }
+        }
+      } else {
+        const pages = await out.copyPages(src, srcIdx);
+        pages.forEach(p => out.addPage(p));
+      }
     }
     const bytes = await out.save();
+    /* v-kompres: bandingkan dgn perkiraan ukuran tanpa-kompres utk catatan jujur di hasil */
+    const estRaw = plan.reduce((a, p) => a + (p.f.bytes ? p.f.bytes.byteLength * p.idx.length / Math.max(1, p.f.pages || p.idx.length) : 0), 0);
+    let compNote = '';
+    if (tgComp !== 'none' && estRaw && bytes.length >= estRaw) compNote = 'kompres ' + TG_COMP[tgComp].label + ' tak mengecilkan berkas (sumber sudah efisien)';
+    else if (tgComp !== 'none' && estRaw) { const pct = Math.round((1 - bytes.length / estRaw) * 100); if (pct > 0) toast('🗜 Kompres ' + TG_COMP[tgComp].label + ': ' + fmtBytes(Math.round(estRaw)) + ' → ' + fmtBytes(bytes.length) + ' (−' + pct + '%)'); }
     const base = (TG.title || 'gabungan-tagihan').toLowerCase().replace(/[^\w\s-]+/g, '').trim().replace(/\s+/g, '-').slice(0, 48) || 'gabungan';
-    TG.out = { url: URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' })), size: bytes.length, pages: out.getPageCount(), name: base + '-' + now.toISOString().slice(0, 10) + '.pdf', bytes };
+    TG.out = { url: URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' })), size: bytes.length, pages: out.getPageCount(), name: base + '-' + now.toISOString().slice(0, 10) + '.pdf', bytes, comp: tgComp, compIn: Math.round(estRaw), note: compNote };
     TG.stage = 'done'; tgPaint();
     tgResultOpen();
   } catch (e) { console.error('[tgMerge]', e); toast('Gagal menggabung: ' + e.message); }
@@ -3580,7 +3716,9 @@ function tgRvPaint(){
 function tgResultOpen(){
   if (!TG.out) return;
   tgRvDest = 'db';
-  $('#tgResultMeta').textContent = TG.out.pages + ' halaman · ' + fmtBytes(TG.out.size);
+  $('#tgResultMeta').textContent = TG.out.pages + ' halaman · ' + fmtBytes(TG.out.size) +
+    (TG.out.comp && TG.out.comp !== 'none' ? ' · 🗜 ' + TG_COMP[TG.out.comp].label + ' (±' + fmtBytes(TG.out.compIn) + ')' : '') +
+    (TG.out.note ? ' · ⚠ ' + TG.out.note : '');
   $('#tgResultPrev').src = TG.out.url;
   $('#tgResultTitle').value = TG.out.name.replace(/\.pdf$/i, '');
   $('#tgResultMsg').textContent = '';
@@ -3640,7 +3778,9 @@ function tgPaintDone(){
   body.innerHTML = '<div class="tg-card"><h3>SELESAI — FILE GABUNGAN TERBENTUK</h3>' +
     '<p class="tg-sub">Halaman pembuka + pemisah antar berkas sudah disisipkan. Unduhan otomatis dimulai; kalau tidak, pakai tombol di bawah.</p>' +
     '<div class="tg-out" style="margin-top:12px"><b>✓</b><div style="flex:1;min-width:0"><b style="color:var(--text)">' + esc(TG.out.name) + '</b>' +
-    '<div class="tg-sub">' + TG.out.pages + ' halaman · ' + fmtBytes(TG.out.size) + '</div></div>' +
+    '<div class="tg-sub">' + TG.out.pages + ' halaman · ' + fmtBytes(TG.out.size) +
+    (TG.out.comp && TG.out.comp !== 'none' ? ' · 🗜 ' + TG_COMP[TG.out.comp].label + ' — ±' + fmtBytes(TG.out.compIn) + ' → ' + fmtBytes(TG.out.size) : '') +
+    (TG.out.note ? '<br>⚠ ' + esc(TG.out.note) : '') + '</div></div>' +
     '<a class="tg-btn primary" style="text-decoration:none" href="' + TG.out.url + '" download="' + esc(TG.out.name) + '">⬇ Unduh</a></div>' +
     '<div class="tg-actions" style="margin-top:12px"><button class="tg-btn" id="tgAgain">Mulai gabungan baru</button>' +
     '<button class="tg-btn" id="tgBackSel">Koreksi pilihan halaman</button>' +

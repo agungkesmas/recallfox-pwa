@@ -3,6 +3,39 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+  <!-- v1.23.0: pengunjung desktop di root otomatis diarahkan ke /desktop.html (PWA desktop).
+       Ponsel/tablet tetap di PWA mobile. Detail aturan di blok script bawah. -->
+  <script>
+  (function () {
+    try {
+      var p = location.pathname, s = location.search, h = location.hash;
+      /* Hanya root persis. Path lain aman: /share-target (share_target addon/Android),
+         /auth-relay.html, /offline.html, /desktop.html, assets bundle — tidak disentuh. */
+      if (p !== '/' && p !== '/index.html') return;
+      /* Escape hatch: buka "/?mobile=1" (atau #mobile) utk tetap lihat PWA mobile
+         di desktop — diingat sepanjang sesi tab ini. */
+      if (s.indexOf('mobile=1') !== -1 || h === '#mobile' || sessionStorage.getItem('rf-force-mobile') === '1') {
+        sessionStorage.setItem('rf-force-mobile', '1');
+        return;
+      }
+      /* Ada query share/target → kemungkinan alur share; jangan ganggu. */
+      if (s.indexOf('share') !== -1 || s.indexOf('target') !== -1) return;
+      var ua = navigator.userAgent || '';
+      var touch = ('ontouchstart' in window) && (navigator.maxTouchPoints || 0) > 0;
+      var mobileUA = /Android|iPhone|iPad|iPod|IEMobile|Opera Mini|Mobile/i.test(ua);
+      /* iPad baru: UA "Macintosh" tapi punya banyak titik sentuh. */
+      var iPad = /Macintosh/.test(ua) && touch && (navigator.maxTouchPoints || 0) > 1;
+      var wide = Math.max(screen.width || 0, screen.height || 0) >= 900;
+      var standalone = (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone === true;
+      /* Desktop = UA bukan mobile, bukan iPad, layar lega, dan bukan PWA terpasang di perangkat sentuh. */
+      var desktop = !mobileUA && !iPad && wide && !(standalone && touch);
+      if (desktop) {
+        sessionStorage.removeItem('rf-force-mobile');
+        location.replace('/desktop.html' + s + h);
+      }
+    } catch (e) { /* jangan pernah blok PWA mobile karena error skrip ini */ }
+  })();
+  </script>
   <meta name="theme-color" content="#6d3df5" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
