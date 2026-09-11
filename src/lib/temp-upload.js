@@ -37,18 +37,62 @@ export const TEMP_UPLOAD_ENDPOINT =
 // v1.21.0: tujuan ketiga — MANUAL. User upload sendiri di situs luar (klik,
 // tab baru), lalu tempel URL. Tidak ada upload otomatis, tidak ada retry.
 // Vault manual selalu TTL 72 jam (3 hari) terlepas dari masa simpan situs.
+// v1.22.0: gofile.io KELUAR dari daftar (laporan user: sudah tidak bisa
+// dipakai), diganti temp.sh. Catatan penting: temp.sh hanya untuk alur
+// MANUAL (user buka situs, upload sendiri, tempel URL yang buka halaman
+// unduh) — TETAP tidak dipakai uploadToTempHost otomatis karena URL-nya
+// halaman HTML, bukan file mentah (lihat audit v3.24.12 di atas). Di alur
+// MANUAL ini bukan masalah: item vault manual tidak pernah fetch isi file
+// (body kosong, size 0) — user buka URL-nya di tab dan unduh lewat tombolnya.
 export const TEMP_HOST_MANUAL = 'manual';
 export const MANUAL_TEMP_DURATION = '72h';
-// Daftar situs terverifikasi via curl 2026-09-10/11 (raw + direct):
-// litterbox (CORS *, raw, 1GB), catbox (raw, permanen, tanpa CORS — addon OK),
-// gofile (JSON downloadPage), tmpfiles (raw? HTML — hanya darurat).
-// 0x0.st & file.io & temp.sh DITOLAK hasil audit (mati / sekali-unduh / HTML).
+// v1.22.0: daftar situs default terverifikasi via curl 2026-09-11:
+// litterbox (raw, 1GB, 1–72 jam), catbox (raw, permanen, 200MB),
+// temp.sh (POST /upload → halaman unduh, file hilang 3 hari — sinkron dgn
+// TTL vault manual), tmpfiles (100MB, 7 hari).
+// DAFTAR INI HANYA DEFAULT — user bisa mengelola sendiri (tambah/ubah/hapus)
+// lewat tombol ✏️ Kelola di panel Manual; daftar pilihan user disimpan di
+// localStorage key 'recallfox_manual_sites' dan divalidasi oleh
+// sanitizeManualSites() di bawah. (Paritas 1:1 dengan addon v3.24.19.)
 export const MANUAL_SITES = [
   { label: 'litterbox.catbox.moe', url: 'https://litterbox.catbox.moe/', note: '1GB · 1–72 jam · link langsung' },
   { label: 'catbox.moe', url: 'https://catbox.moe/', note: '200MB · permanen · link langsung' },
-  { label: 'gofile.io', url: 'https://gofile.io/upload', note: 'besar · link via halaman' },
+  { label: 'temp.sh', url: 'https://temp.sh/', note: 'besar · file hilang 3 hari · unduh via tombol di halaman' },
   { label: 'tmpfiles.org', url: 'https://tmpfiles.org/', note: '100MB · 7 hari' }
 ];
+
+// v1.22.0: pengelolaan daftar situs oleh user.
+// MANUAL_SITES_MAX — batas jumlah situs (cegah overflow panel).
+// sanitizeManualSites(raw) — fungsi MURNI (tanpa akses storage) yang membersihkan
+// daftar apa pun dari storage jadi daftar valid: label 1–40 char, url wajib
+// https:// maks 300 char, note maks 100 char, dedupe by URL (normalisasi:
+// lowercase + tanpa garis miring ekor), maks MANUAL_SITES_MAX entri.
+// Dipakai addon (popup.js) dan PWA (main.js) — paritas 1:1.
+export const MANUAL_SITES_MAX = 12;
+
+export function sanitizeManualSites(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const r of raw) {
+    if (!r || typeof r !== 'object') continue;
+    const label = typeof r.label === 'string' ? r.label.trim().slice(0, 40) : '';
+    const url = typeof r.url === 'string' ? r.url.trim().slice(0, 300) : '';
+    const note = typeof r.note === 'string' ? r.note.trim().slice(0, 100) : '';
+    if (!label || !/^https:\/\//i.test(url)) continue;
+    const key = url.replace(/\/+$/, '').toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ label, url, note });
+    if (out.length >= MANUAL_SITES_MAX) break;
+  }
+  return out;
+}
+
+// hostname dari URL (untuk tooltip/catatan situs kustom) — URL invalid → ''.
+export function manualSiteHost(url) {
+  try { return new URL(url).hostname || ''; } catch (e) { return ''; }
+}
 
 // Durasi yang tersedia di UI. `time` = parameter API litterbox.
 // Litterbox hanya menerima 1h/12h/24h/72h — jangan tambah nilai lain.

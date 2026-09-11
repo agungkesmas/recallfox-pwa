@@ -17,7 +17,7 @@ import './styles/sticky.css';  // v1.17.0: strip sticky Waktu Shalat & Puasa (pa
 import { getSession, onAuthChange, handleOAuthCallback } from './auth.js';
 import { pullFromCloud, subscribeRealtime, unsubscribeRealtime, processSyncQueue, createFileItem, cleanupExpiredTempItems } from './sync.js';
 // v1.18.0: label durasi untuk picker tujuan upload sementara
-import { TEMP_DURATIONS, TEMP_HOST_LABEL, TEMP_HOST_MANUAL, MANUAL_TEMP_DURATION, MANUAL_SITES, tempExpiresAt } from './lib/temp-upload.js';
+import { TEMP_DURATIONS, TEMP_HOST_LABEL, TEMP_HOST_MANUAL, MANUAL_TEMP_DURATION, MANUAL_SITES, MANUAL_SITES_MAX, sanitizeManualSites, manualSiteHost, tempExpiresAt } from './lib/temp-upload.js';
 // v1.20.0: klasifikasi file 1:1 addon (teks + Office + gambar + arsip)
 import { detectFileKind, rejectHintFor, kindIcon, formatBytes, FILE_ACCEPT_ATTR, MAX_TEXT_UPLOAD_BYTES, MAX_BINARY_UPLOAD_BYTES, MAX_TEMP_UPLOAD_BYTES } from './lib/file-kinds.js';
 import { renderLogin, renderForgotPassword, renderResetPassword } from './views/login.js';
@@ -442,8 +442,22 @@ function openFileUploadSheet() {
           <select id="fileTempDur" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin:4px 0 0;font-size:14px;background:var(--surface);color:var(--text)">${durOptions}</select>
         </div>
         <div id="fileManualRow" style="display:none;margin:4px 0 6px;border:1px solid var(--border);border-radius:10px;padding:10px;background:var(--surface)">
-          <div style="font-size:12px;font-weight:600;margin-bottom:6px">🌐 Upload manual — pilih situs, upload di tab baru, lalu tempel URL di bawah</div>
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">
+            <div style="font-size:12px;font-weight:600">🌐 Upload manual — pilih situs, upload di tab baru, lalu tempel URL di bawah</div>
+            <button type="button" id="fileManualManageBtn" style="flex:none;font-size:11px;padding:5px 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-weight:600;white-space:nowrap;cursor:pointer">✏️ Kelola</button>
+          </div>
           <div id="fileManualSites" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px"></div>
+          <div id="fileManualManage" style="display:none;border-top:1px dashed var(--border);padding-top:8px">
+            <div id="fileMsList" style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px"></div>
+            <input type="text" id="fileMsLabel" placeholder="Nama situs — mis. transfer.sh" maxlength="40" style="width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:8px;margin:0 0 6px;font-size:13px;background:var(--surface);color:var(--text)">
+            <input type="url" id="fileMsUrl" placeholder="https://... (wajib https)" style="width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:8px;margin:0 0 8px;font-size:13px;background:var(--surface);color:var(--text)">
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <button type="button" id="fileMsSubmit" style="font-size:12px;padding:7px 12px;border:1px solid var(--border);border-radius:8px;background:var(--primary);color:#fff;font-weight:600;cursor:pointer">＋ Tambah</button>
+              <button type="button" id="fileMsCancel" style="display:none;font-size:12px;padding:7px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer">Batal edit</button>
+              <button type="button" id="fileMsReset" style="font-size:12px;padding:7px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);cursor:pointer">↺ Pulihkan default</button>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:6px">Daftar tersimpan di browser/device ini (maks ${MANUAL_SITES_MAX} situs). ✏️ = ubah · 🗑 = hapus.</div>
+          </div>
           <label style="font-size:12px;font-weight:600;color:var(--text-muted)">URL file <span style="font-weight:400">(dari situs temp)</span></label>
           <input type="url" id="fileManualUrl" placeholder="https://..." style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:8px;margin:4px 0 6px;font-size:14px;background:var(--surface);color:var(--text)">
           <label style="font-size:12px;font-weight:600;color:var(--text-muted)">Nama file <span style="font-weight:400">(opsional — otomatis dari URL bila kosong)</span></label>
@@ -501,14 +515,113 @@ function openFileUploadSheet() {
       db: reqEl('fileDestDb'), temp: reqEl('fileDestTemp'), manual: reqEl('fileDestManual'),
       durRow: reqEl('fileTempDurRow'), dur: reqEl('fileTempDur'),
       manualRow: reqEl('fileManualRow'), sites: reqEl('fileManualSites'),
+      // v1.22.0: elemen kelola daftar situs (reqEl melempar bila ada yang hilang
+      // → sheet gagal EKSPLISIT, bukan tombol mati diam-diam)
+      manageBtn: reqEl('fileManualManageBtn'), manageBox: reqEl('fileManualManage'),
+      msList: reqEl('fileMsList'), msLabel: reqEl('fileMsLabel'), msUrl: reqEl('fileMsUrl'),
+      msSubmit: reqEl('fileMsSubmit'), msCancel: reqEl('fileMsCancel'), msReset: reqEl('fileMsReset'),
       manualUrl: reqEl('fileManualUrl'), manualName: reqEl('fileManualName'),
       note: reqEl('fileDestNote'), dropzone: reqEl('fileDropzone'),
       preview: reqEl('filePreview'), save: reqEl('fileSave'), cancel: reqEl('fileCancel')
     };
-    // Daftar situs dirender SEKALI (bukan di tiap repaint — dulu di _paintDest).
-    ui.sites.innerHTML = MANUAL_SITES.map(s =>
-      '<a href="' + s.url + '" target="_blank" rel="noopener" title="' + s.note + '" style="font-size:11px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);text-decoration:none;color:var(--text)">'
-      + s.label + '</a>').join('');
+    // v1.22.0: DAFTAR SITUS BISA DIKELOLA USER (tambah/ubah/hapus/pulihkan).
+    // Arsitektur paritas 1:1 dengan addon v3.24.19:
+    //  - _sites = daftar aktif; diisi default dulu (instan), lalu dioverride
+    //    async dari localStorage bila user pernah menyimpan daftar sendiri.
+    //  - Render chips TETAP di luar _paintDest (listener tidak terduplikasi).
+    //  - Semua data user (label/url/note) di-escape sebelum masuk innerHTML.
+    //  - Listener semua dipasang SEKALI di sini.
+    //  - localStorage gagal → fallback default + alert jelas, tidak crash.
+    const escHtml = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    let _sites = MANUAL_SITES.map(s => ({ label: s.label, url: s.url, note: s.note }));
+    let _sitesManage = false, _msEditIdx = -1;
+    const SITES_KEY = 'recallfox_manual_sites';
+    function loadSites() {
+      try {
+        const raw = localStorage.getItem(SITES_KEY);
+        if (!raw) return null;
+        const arr = sanitizeManualSites(JSON.parse(raw));
+        return arr.length ? arr : null;
+      } catch (e) { return null; }
+    }
+    function saveSites() {
+      try { localStorage.setItem(SITES_KEY, JSON.stringify(_sites)); }
+      catch (e) { alert('⚠ Daftar situs gagal tersimpan — daftar default dipakai sesi ini'); }
+    }
+    function msFormReset() {
+      _msEditIdx = -1;
+      ui.msLabel.value = ''; ui.msUrl.value = '';
+      ui.msSubmit.textContent = '＋ Tambah';
+      ui.msCancel.style.display = 'none';
+    }
+    function renderSites() {
+      ui.sites.innerHTML = _sites.map(s =>
+        '<a href="' + escHtml(s.url) + '" target="_blank" rel="noopener" title="' + escHtml(s.note || s.url) + '" style="font-size:11px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);text-decoration:none;color:var(--text)">'
+        + escHtml(s.label) + '</a>').join('');
+    }
+    function renderManage() {
+      ui.msList.innerHTML = _sites.length ? _sites.map((s, i) =>
+        '<div style="display:flex;align-items:center;gap:6px;font-size:12px">'
+        + '<div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><b>' + escHtml(s.label) + '</b> <span style="color:var(--text-muted)">· ' + escHtml(manualSiteHost(s.url) || s.url) + '</span></div>'
+        + '<button type="button" data-edit="' + i + '" style="flex:none;font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);cursor:pointer" title="Ubah situs ini">✏️</button>'
+        + '<button type="button" data-del="' + i + '" style="flex:none;font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text);cursor:pointer" title="Hapus dari daftar">🗑</button>'
+        + '</div>'
+      ).join('') : '<div style="font-size:12px;color:var(--text-muted)">Daftar kosong — tambah situs di bawah atau pulihkan default.</div>';
+      ui.msList.querySelectorAll('button[data-edit]').forEach(bn => bn.addEventListener('click', () => {
+        const i = Number(bn.dataset.edit);
+        if (!_sites[i]) return;
+        _msEditIdx = i;
+        ui.msLabel.value = _sites[i].label;
+        ui.msUrl.value = _sites[i].url;
+        ui.msSubmit.textContent = '✓ Update';
+        ui.msCancel.style.display = '';
+        ui.msLabel.focus();
+      }));
+      ui.msList.querySelectorAll('button[data-del]').forEach(bn => bn.addEventListener('click', () => {
+        const i = Number(bn.dataset.del);
+        const gone = _sites[i] ? _sites[i].label : '';
+        _sites.splice(i, 1);
+        if (_msEditIdx === i) msFormReset();
+        else if (_msEditIdx > i) _msEditIdx--;
+        saveSites();
+        renderManage();
+      }));
+    }
+    function setSitesMode(on) {
+      _sitesManage = !!on;
+      ui.sites.style.display = _sitesManage ? 'none' : '';
+      ui.manageBox.style.display = _sitesManage ? '' : 'none';
+      ui.manageBtn.textContent = _sitesManage ? '✓ Selesai' : '✏️ Kelola';
+      if (_sitesManage) { msFormReset(); renderManage(); }
+      else { renderSites(); }
+    }
+    ui.manageBtn.addEventListener('click', () => setSitesMode(!_sitesManage));
+    ui.msCancel.addEventListener('click', msFormReset);
+    ui.msReset.addEventListener('click', () => {
+      _sites = MANUAL_SITES.map(s => ({ label: s.label, url: s.url, note: s.note }));
+      msFormReset();
+      saveSites();
+      renderManage();
+    });
+    ui.msSubmit.addEventListener('click', () => {
+      const label = (ui.msLabel.value || '').trim();
+      const url = (ui.msUrl.value || '').trim();
+      if (!label) { alert('⚠ Nama situs wajib diisi'); return; }
+      if (!/^https:\/\//i.test(url)) { alert('⚠ URL situs wajib diawali https://'); return; }
+      const key = url.replace(/\/+$/, '').toLowerCase();
+      const dup = _sites.findIndex(s => s.url.replace(/\/+$/, '').toLowerCase() === key);
+      if (dup !== -1 && dup !== _msEditIdx) { alert('⚠ Situs dengan URL itu sudah ada di daftar'); return; }
+      if (_msEditIdx === -1 && _sites.length >= MANUAL_SITES_MAX) { alert('⚠ Maks ' + MANUAL_SITES_MAX + ' situs'); return; }
+      const note = 'situs kustom · ' + (manualSiteHost(url) || url.slice(0, 60));
+      if (_msEditIdx === -1) _sites.push({ label, url, note });
+      else _sites[_msEditIdx] = { label, url, note };
+      saveSites();
+      msFormReset();
+      renderManage();
+    });
+    renderSites(); // default dulu — instan, tanpa menunggu storage
+    const savedSites = loadSites();
+    if (savedSites) { _sites = savedSites; if (_sitesManage) renderManage(); else renderSites(); }
   } catch (e) {
     sheet.remove();
     alert('⚠ Sheet upload rusak: ' + e.message);
