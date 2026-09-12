@@ -44,21 +44,34 @@ export const TEMP_UPLOAD_ENDPOINT =
 // halaman HTML, bukan file mentah (lihat audit v3.24.12 di atas). Di alur
 // MANUAL ini bukan masalah: item vault manual tidak pernah fetch isi file
 // (body kosong, size 0) — user buka URL-nya di tab dan unduh lewat tombolnya.
+// v1.23.2: gofile.io KEMBALI ke daftar default (permintaan user — dipakai
+// untuk workspace AI agent; riset ulang 2026-09-12: situs hidup, multi-node
+// check HTTP 200; laporan lama sudah usang).
 export const TEMP_HOST_MANUAL = 'manual';
 export const MANUAL_TEMP_DURATION = '72h';
-// v1.22.0: daftar situs default terverifikasi via curl 2026-09-11:
-// litterbox (raw, 1GB, 1–72 jam), catbox (raw, permanen, 200MB),
-// temp.sh (POST /upload → halaman unduh, file hilang 3 hari — sinkron dgn
-// TTL vault manual), tmpfiles (100MB, 7 hari).
+// v1.23.2: daftar situs default hasil riset + uji upload curl LIVE 2026-09-12
+// (18 kandidat → 10 lolos) — paritas 1:1 dengan addon v3.24.24: gofile,
+// litterbox (1GB, 1–72 jam), tmpfiles (100MB, 7 hari), filebin (bin 6 hari),
+// temp.sh (hilang 3 hari), uguu (128MB, 3 jam), x0.at (≥30 hari), pixeldrain
+// (20GB, tanpa akun), storage.to (25GB), catbox (permanen; anonim API kadang
+// ditolak "Invalid uploader" → pakai litterbox). Mati/gagal uji: transfer.sh,
+// bashupload.com (DNS hilang), fileconvoy, 0x0.st (flaky), file.io (sekali
+// unduh), krakenfiles (uji gagal).
 // DAFTAR INI HANYA DEFAULT — user bisa mengelola sendiri (tambah/ubah/hapus)
 // lewat tombol ✏️ Kelola di panel Manual; daftar pilihan user disimpan di
 // localStorage key 'recallfox_manual_sites' dan divalidasi oleh
-// sanitizeManualSites() di bawah. (Paritas 1:1 dengan addon v3.24.19.)
+// sanitizeManualSites() di bawah. (Paritas 1:1 dengan addon v3.24.24.)
 export const MANUAL_SITES = [
+  { label: 'gofile.io', url: 'https://gofile.io/', note: 'populer · tanpa akun · halaman unduh' },
   { label: 'litterbox.catbox.moe', url: 'https://litterbox.catbox.moe/', note: '1GB · 1–72 jam · link langsung' },
-  { label: 'catbox.moe', url: 'https://catbox.moe/', note: '200MB · permanen · link langsung' },
-  { label: 'temp.sh', url: 'https://temp.sh/', note: 'besar · file hilang 3 hari · unduh via tombol di halaman' },
-  { label: 'tmpfiles.org', url: 'https://tmpfiles.org/', note: '100MB · 7 hari' }
+  { label: 'tmpfiles.org', url: 'https://tmpfiles.org/', note: '100MB · 7 hari · link langsung' },
+  { label: 'filebin.net', url: 'https://filebin.net/', note: 'tanpa akun · bin hilang 6 hari' },
+  { label: 'temp.sh', url: 'https://temp.sh/', note: 'besar · hilang 3 hari · unduh via tombol di halaman' },
+  { label: 'uguu.se', url: 'https://uguu.se/', note: '128MB · 3 jam · link langsung' },
+  { label: 'x0.at', url: 'https://x0.at/', note: '≥30 hari · link langsung · curl friendly' },
+  { label: 'pixeldrain.com', url: 'https://pixeldrain.com/', note: 'populer · 20GB · tanpa akun' },
+  { label: 'storage.to', url: 'https://storage.to/', note: '25GB · tanpa speed limit · tanpa akun' },
+  { label: 'catbox.moe', url: 'https://catbox.moe/', note: '200MB · permanen · bila gagal pakai litterbox' }
 ];
 
 // v1.22.0: pengelolaan daftar situs oleh user.

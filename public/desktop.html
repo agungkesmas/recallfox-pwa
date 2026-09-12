@@ -2814,12 +2814,25 @@ initSplitters();
 /*==== SYNC v1 part1 ====*/
 /* ================== SYNC v1 — bagian 1: situs manual, shalat, media, shell ================== */
 
-/* ---------- 1. Manajer situs upload manual (paritas PWA mobile v1.22.0) ---------- */
+/* ---------- 1. Manajer situs upload manual (paritas PWA mobile v1.22.0) ----------
+   v1.23.2: riset ulang + uji curl live 2026-09-12 (18 kandidat → 10 lolos).
+   gofile.io KEMBALI ke daftar (permintaan user; situs hidup — multi-node check
+   HTTP 200; laporan v3.24.19 sudah usang), plus 5 situs baru: filebin.net,
+   uguu.se, x0.at, pixeldrain.com, storage.to. Yang MATI tidak dimasukkan:
+   transfer.sh & bashupload.com (DNS hilang), fileconvoy (mati), 0x0.st (flaky),
+   file.io (sekali unduh), krakenfiles (uji 2 langkah gagal). Catbox tetap ada
+   tapi upload anonimnya kadang ditolak "Invalid uploader" → fallback litterbox. */
 const RF_SITES_DEF = [
+  { label: 'gofile.io', url: 'https://gofile.io/', note: 'populer · tanpa akun · halaman unduh' },
   { label: 'litterbox.catbox.moe', url: 'https://litterbox.catbox.moe/', note: '1GB · 1–72 jam · link langsung' },
-  { label: 'catbox.moe', url: 'https://catbox.moe/', note: '200MB · permanen · link langsung' },
-  { label: 'temp.sh', url: 'https://temp.sh/', note: 'besar · file hilang 3 hari · unduh via tombol di halaman' },
-  { label: 'tmpfiles.org', url: 'https://tmpfiles.org/', note: '100MB · 7 hari' }
+  { label: 'tmpfiles.org', url: 'https://tmpfiles.org/', note: '100MB · 7 hari · link langsung' },
+  { label: 'filebin.net', url: 'https://filebin.net/', note: 'tanpa akun · bin hilang 6 hari' },
+  { label: 'temp.sh', url: 'https://temp.sh/', note: 'besar · hilang 3 hari · unduh via tombol di halaman' },
+  { label: 'uguu.se', url: 'https://uguu.se/', note: '128MB · 3 jam · link langsung' },
+  { label: 'x0.at', url: 'https://x0.at/', note: '≥30 hari · link langsung · curl friendly' },
+  { label: 'pixeldrain.com', url: 'https://pixeldrain.com/', note: 'populer · 20GB · tanpa akun' },
+  { label: 'storage.to', url: 'https://storage.to/', note: '25GB · tanpa speed limit · tanpa akun' },
+  { label: 'catbox.moe', url: 'https://catbox.moe/', note: '200MB · permanen · bila gagal pakai litterbox' }
 ];
 const RF_SITES_MAX = 12;
 let rfSitesEdit = false;
