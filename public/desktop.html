@@ -3343,6 +3343,31 @@ const TR = { rows: [], target: '' };
 try { const t = JSON.parse(localStorage.getItem('rf-dt-rekons') || 'null'); if (t) { TR.rows = Array.isArray(t.rows) ? t.rows : []; TR.target = String(t.target || ''); } } catch (e) {}
 function trSave(){ try { localStorage.setItem('rf-dt-rekons', JSON.stringify({ rows: TR.rows, target: TR.target })); } catch (e) {} }
 
+/* ================== REKONSILIASI — PECAH EXCEL PER PENERIMA (v1.24.0) ==================
+   RESTORASI fitur Rekonsiliasi versi addon (v3.24.10) ke Desktop — paritas 1:1:
+   Laporan Pembayaran Jaminan BPJS (.xls/.xlsx/.csv) dipecah otomatis per
+   "Nama Rek. Penerima" → ZIP berisi 1 berkas Excel per penerima (semua kolom
+   asli + baris TOTAL, urut Tgl Bayar → Kode Klaim) + REKAP.xlsx (1 baris per
+   penerima). Mesin: vendor/xlsx-engine.js (RFRekonEngine — md5 identik dgn
+   addon Firefox & Chrome) + vendor/xlsx.full.min.js (SheetJS 0.18.5) +
+   vendor/fflate.min.js (0.8.3) — semua lokal di /vendor, tanpa jaringan.
+   Favorit ★ localStorage kunci 'rf_rekon_favs_v1' (sama dgn addon). */
+const TRK = { parsed: null, analyzed: null, fileName: '', selected: new Set(), favs: new Set(), search: '', busy: false };
+let trkRuntimeP = null;
+function trkEnsureRuntime(){
+  if (window.RFRekonEngine) return Promise.resolve();
+  if (trkRuntimeP) return trkRuntimeP;
+  trkRuntimeP = (async () => {
+    if (!window.XLSX) await rfLoadScript('vendor/xlsx.full.min.js');
+    if (!window.fflate) await rfLoadScript('vendor/fflate.min.js');
+    await rfLoadScript('vendor/xlsx-engine.js');
+    if (!window.RFRekonEngine) throw new Error('Mesin Rekonsiliasi gagal dimuat.');
+  })().catch(e => { trkRuntimeP = null; throw e; });
+  return trkRuntimeP;
+}
+function trkGetFavs(){ try { const a = JSON.parse(localStorage.getItem('rf_rekon_favs_v1') || '[]'); return Array.isArray(a) ? a.filter(x => typeof x === 'string' && x) : []; } catch (e) { return []; } }
+function trkSetFavs(arr){ try { localStorage.setItem('rf_rekon_favs_v1', JSON.stringify(arr.slice(0, 500))); } catch (e) {} }
+
 /* ----- draf Gabung di IndexedDB (tahan refresh & tab tertutup) -----
    Yang disimpan: bytes asli + judul + centangan + urutan + stage.
    Thumbnail & doc pdf.js dibuka ulang otomatis (tidak disimpan). */
@@ -3911,14 +3936,172 @@ async function tuThumbs(){
   }
 }
 
-/* ============================ TAB: REKONSILIASI ============================ */
+/* ============================ TAB: REKONSILIASI ============================
+   v1.24.0: fitur utama = PECAH EXCEL PER PENERIMA (restorasi addon v3.24.10,
+   paritas 1:1) + lampiran pencocok kwitansi manual (alat lama, dipertahankan). */
 function trPaint(){
   const body = $('#tgBody'); if (!body) return;
+  body.innerHTML =
+    '<div class="tg-card"><h3>REKONSILIASI TAGIHAN — PECAH EXCEL PER PENERIMA</h3>' +
+    '<p class="tg-sub">Laporan Pembayaran Jaminan BPJS (.xls/.xlsx/.csv) dipecah otomatis per <b>Nama Rekening Penerima</b> — satu berkas Excel per penerima (semua kolom asli + baris TOTAL, urut tanggal) + REKAP, dikemas satu <b>ZIP</b>. <b>100% offline</b> — tanpa server, tanpa login; tidak ada data yang dikirim ke mana pun.</p>' +
+    '<input type="file" id="trkFile" accept=".xls,.xlsx,.csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" style="display:none">' +
+    '<div class="tg-actions" style="margin-top:10px"><button class="tg-btn primary" id="trkPick">📊 Pilih berkas Excel…</button></div>' +
+    '<div id="trkState" style="margin-top:10px"></div></div>' +
+    '<div id="trkResult"></div>' +
+    '<div class="tg-card" style="margin-top:12px" id="trkManual"></div>' +
+    '<div class="tg-card" style="margin-top:12px;background:var(--bg)"><span style="font-size:12.5px;line-height:1.6">💡 Rekening yang diberi <b>★</b> tersimpan permanen di browser ini — berikutnya cukup tekan <b>★ Favorit</b> tanpa nyortir ulang setiap bulan.</span></div>';
+  $('#trkPick').onclick = () => $('#trkFile').click();
+  $('#trkFile').onchange = e => { const f = e.target.files[0]; e.target.value = ''; f && trkHandleFile(f); };
+  trManualPaint();
+  if (TRK.analyzed) { trkRenderSummary(); trkRenderList(); trkUpdateBar(); }
+}
+
+async function trkHandleFile(file){
+  const st = $('#trkState'), res = $('#trkResult');
+  if (!st || TRK.busy) return;
+  const okExt = /\.(xls|xlsx|csv)$/i.test(file.name) || /spreadsheetml|ms-?excel|csv/i.test(file.type || '');
+  if (!okExt) { st.innerHTML = '<div class="tg-bad" style="display:block">⚠ Harus berkas Excel (.xls / .xlsx / .csv).</div>'; return; }
+  TRK.busy = true;
+  try {
+    st.innerHTML = '<div class="tg-loading" style="padding:14px">⏳ Memuat mesin Excel (lokal)…</div>';
+    await trkEnsureRuntime();
+    st.innerHTML = '<div class="tg-loading" style="padding:14px">⏳ Membaca <b>' + esc(file.name) + '</b>…</div>';
+    if (res) res.innerHTML = '';
+    const buf = await file.arrayBuffer();
+    const E = window.RFRekonEngine;
+    const parsed = E.parseWorkbook(new Uint8Array(buf));
+    const analyzed = E.analyze(parsed);
+    TRK.parsed = parsed; TRK.analyzed = analyzed; TRK.fileName = file.name;
+    TRK.favs = new Set(trkGetFavs()); TRK.search = '';
+    const keys = analyzed.groups.map(g => g.key);
+    const favHit = keys.filter(k => TRK.favs.has(k));
+    TRK.selected = new Set(favHit.length ? favHit : keys);
+    st.innerHTML = '';
+    trkRenderSummary();
+    if (favHit.length && favHit.length < keys.length) toast('★ ' + favHit.length + ' rekening favorit dipilih');
+  } catch (e) {
+    console.error('[desktop rekon]', e);
+    st.innerHTML = '<div class="tg-bad" style="display:block">⚠ ' + esc(e.message || 'Gagal membaca berkas.') + '</div>';
+    if (res) res.innerHTML = '';
+  } finally { TRK.busy = false; }
+}
+
+function trkRenderSummary(){
+  const res = $('#trkResult'); if (!res || !TRK.analyzed) return;
+  const E = window.RFRekonEngine, s = TRK.analyzed.stats;
+  const chip = (l, v, c) => '<div style="background:var(--bg);border:1px solid var(--border);border-radius:10px;padding:7px 9px"><div style="font-size:9.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;font-weight:700">' + esc(l) + '</div><div style="font-size:13.5px;font-weight:800;color:' + c + '">' + esc(v) + '</div></div>';
+  res.innerHTML = '<div class="tg-card" style="margin-top:12px"><h3>Hasil analisa — siap dipecah</h3>' +
+    '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:6px;margin:9px 0">' +
+      chip('Tagihan', String(s.totalRows), 'var(--text)') +
+      chip('Penerima', String(s.groups), 'var(--success)') +
+      chip('Total', E.fmtRp(s.totalAmount), 'var(--primary)') +
+      chip('Periode', s.dateMinIso ? E.fmtDate(s.dateMinIso) + ' – ' + E.fmtDate(s.dateMaxIso) : '—', 'var(--muted)') +
+    '</div>' +
+    '<input type="text" id="trkSearch" placeholder="🔍 Cari nama rekening…" value="' + esc(TRK.search) + '" style="width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text);font-size:12.5px;outline:none;margin-bottom:8px">' +
+    '<div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap">' +
+      '<button class="tg-btn" id="trkAll" style="flex:1;font-size:12px">Semua</button>' +
+      '<button class="tg-btn" id="trkNone" style="flex:1;font-size:12px">Nihil</button>' +
+      '<button class="tg-btn" id="trkFav" style="flex:1;font-size:12px">★ Favorit</button>' +
+    '</div>' +
+    '<div id="trkBar" style="font-size:11.5px;font-weight:700;color:var(--primary);background:var(--iris-tint);border-radius:8px;padding:6px 9px;margin-bottom:8px"></div>' +
+    '<div id="trkList" style="border:1px solid var(--border);border-radius:10px;overflow:hidden;margin-bottom:9px;max-height:300px;overflow-y:auto"></div>' +
+    '<div class="tg-actions"><button class="tg-btn primary" id="trkDl" style="flex:1">⬇ Unduh ZIP</button></div>' +
+    '<div id="trkDlState" style="margin-top:9px"></div></div>';
+  $('#trkSearch').oninput = e => { TRK.search = e.target.value || ''; trkRenderList(); };
+  $('#trkAll').onclick = () => { TRK.analyzed.groups.forEach(g => TRK.selected.add(g.key)); trkRenderList(); trkUpdateBar(); };
+  $('#trkNone').onclick = () => { TRK.selected.clear(); trkRenderList(); trkUpdateBar(); };
+  $('#trkFav').onclick = () => {
+    TRK.favs = new Set(trkGetFavs());
+    TRK.selected = new Set(TRK.analyzed.groups.map(g => g.key).filter(k => TRK.favs.has(k)));
+    trkRenderList(); trkUpdateBar();
+    if (!TRK.selected.size) toast('Belum ada rekening favorit — beri ★ dulu pada daftar');
+  };
+  $('#trkList').addEventListener('change', e => {
+    const cb = e.target.closest && e.target.closest('input[type="checkbox"]'); if (!cb) return;
+    const row = cb.closest('[data-rkkey]'); if (!row) return;
+    const k = row.getAttribute('data-rkkey');
+    if (cb.checked) TRK.selected.add(k); else TRK.selected.delete(k);
+    trkUpdateBar();
+  });
+  $('#trkList').addEventListener('click', e => {
+    const star = e.target.closest && e.target.closest('[data-rkstar]'); if (!star) return;
+    const k = star.getAttribute('data-rkstar');
+    if (TRK.favs.has(k)) TRK.favs.delete(k);
+    else { TRK.favs.add(k); toast('★ Disimpan ke favorit'); }
+    trkSetFavs(Array.from(TRK.favs));
+    trkRenderList();
+  });
+  $('#trkDl').onclick = trkDownload;
+  trkRenderList();
+  trkUpdateBar();
+}
+
+function trkRenderList(){
+  const list = $('#trkList'); if (!list || !TRK.analyzed) return;
+  const E = window.RFRekonEngine;
+  const q = E.normKey(TRK.search);
+  const rows = TRK.analyzed.groups.filter(g => !q || E.normKey(g.name).indexOf(q) >= 0);
+  if (!rows.length) { list.innerHTML = '<div style="padding:14px;text-align:center;color:var(--muted);font-size:12px">Tidak ada rekening yang cocok.</div>'; return; }
+  list.innerHTML = rows.map(g => {
+    const on = TRK.selected.has(g.key), fav = TRK.favs.has(g.key);
+    return '<label data-rkkey="' + esc(g.key) + '" style="display:flex;gap:8px;align-items:center;padding:8px 10px;border-bottom:1px solid var(--border);cursor:pointer">' +
+      '<input type="checkbox" ' + (on ? 'checked' : '') + ' style="flex:none;accent-color:var(--primary);width:15px;height:15px;margin:0">' +
+      '<span data-rkstar="' + esc(g.key) + '" title="Tandai favorit" style="flex:none;font-size:14px;line-height:1;color:' + (fav ? 'var(--amber)' : 'var(--border)') + ';cursor:pointer">★</span>' +
+      '<span style="flex:1;min-width:0;font-weight:600;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)">' + esc(g.name) + '</span>' +
+      '<span style="flex:none;font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums">' + g.count + ' · ' + esc(E.fmtNum(g.total)) + '</span></label>';
+  }).join('');
+}
+
+function trkUpdateBar(){
+  const bar = $('#trkBar'), dl = $('#trkDl');
+  if (!bar || !TRK.analyzed) return;
+  const E = window.RFRekonEngine;
+  let n = 0, cnt = 0, tot = 0;
+  for (const g of TRK.analyzed.groups) if (TRK.selected.has(g.key)) { n++; cnt += g.count; tot += g.total; }
+  bar.textContent = n ? 'Dipilih: ' + n + ' penerima · ' + cnt + ' tagihan · ' + E.fmtRp(tot) : 'Belum ada penerima dipilih';
+  if (dl) { dl.disabled = !n; dl.textContent = n ? '⬇ Unduh ZIP (' + n + ' berkas Excel + REKAP)' : '⬇ Unduh ZIP'; }
+}
+
+async function trkDownload(){
+  if (TRK.busy) return;
+  const E = window.RFRekonEngine, dl = $('#trkDl'), st = $('#trkDlState');
+  if (!dl || !TRK.analyzed) return;
+  const n = TRK.analyzed.groups.filter(g => TRK.selected.has(g.key)).length;
+  if (!n) { toast('Centang minimal satu penerima'); return; }
+  TRK.busy = true;
+  const old = dl.textContent;
+  dl.disabled = true; dl.textContent = '⏳ Menyusun…';
+  if (st) st.innerHTML = '<div class="tg-loading" style="padding:14px">⏳ Menyusun ' + n + ' berkas Excel + REKAP…</div>';
+  try {
+    await new Promise(r => setTimeout(r, 30));   /* beri kesempatan UI merender */
+    const u8 = E.buildZip(TRK.parsed, TRK.analyzed, TRK.selected);
+    const blob = new Blob([u8], { type: 'application/zip' });
+    const base = E.safeFilename(String(TRK.fileName).replace(/\.(xlsx|xls|csv)$/i, '') || 'laporan').slice(0, 80);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = base + ' - REKONSILIASI.zip';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    if (st) st.innerHTML = '<div class="tg-ok" style="display:block">✓ ZIP siap — ' + n + ' berkas Excel + REKAP (' + Math.max(1, Math.round(blob.size / 1024)) + ' KB). Cek folder Unduhan.</div>';
+    toast('✓ ZIP Rekonsiliasi berhasil dibuat');
+  } catch (e) {
+    console.error('[desktop rekon download]', e);
+    if (st) st.innerHTML = '<div class="tg-bad" style="display:block">⚠ ' + esc(e.message || 'Gagal membuat ZIP.') + '</div>';
+    toast('Gagal membuat ZIP');
+  } finally {
+    TRK.busy = false;
+    dl.disabled = false; dl.textContent = old;
+    trkUpdateBar();
+  }
+}
+
+/* ----- Lampiran tab Rekonsiliasi: pencocok kwitansi manual (alat lama, utuh) ----- */
+function trManualPaint(){
+  const box = $('#trkManual'); if (!box) return;
   if (!TR.rows.length) TR.rows = [{ label: '', amt: 0 }];
   const total = TR.rows.reduce((a, r) => a + (rfParseAmt(r.amt) || 0), 0);
   const target = rfParseAmt(TR.target);
   const diff = target ? target - total : null;
-  body.innerHTML = '<div class="tg-card"><h3>REKONSILIASI TAGIHAN <span class="hint" style="font-weight:400">— usulan desain, diskusi</span></h3>' +
+  box.innerHTML = '<h3>LAMPIRAN — COCOKKAN KWITANSI (MANUAL)</h3>' +
     '<p class="tg-sub">Cocokkan <b>jumlah rincian</b> dgn <b>total di kwitansi</b>: masukkan tiap butir (nama + nominal), total dihitung otomatis, selisih tampil langsung. Semua data hanya di browser ini.</p>' +
     '<div class="tg-rk">' + TR.rows.map((r, i) =>
       '<div class="tg-rk-row"><input data-rl="' + i + '" value="' + esc(r.label) + '" placeholder="Butir — mis. Obat / Visite dokter">' +
@@ -3930,13 +4113,13 @@ function trPaint(){
     '<div style="margin-top:12px"><label style="font-size:12px;font-weight:700">Total menurut kwitansi</label>' +
     '<input id="trTarget" class="rk-amt" style="max-width:240px;display:block;margin-top:4px" value="' + esc(TR.target) + '" placeholder="mis. 1.750.000"></div>' +
     '<div class="tg-rk-tot"><span>Jumlah rincian: <b>' + rp(total) + '</b></span>' +
-    (diff === null ? '' : (Math.abs(diff) < 1 ? '<span class="tg-ok">✓ COCOK — sama dengan kwitansi</span>' : '<span class="tg-bad">✗ Selisih ' + rp(Math.abs(diff)) + (diff > 0 ? ' (kwitansi lebih besar)' : ' (rincian lebih besar)') + '</span>')) + '</div></div>';
-  body.querySelectorAll('[data-rl]').forEach(inp => inp.onchange = () => { TR.rows[+inp.dataset.rl].label = inp.value; trSave(); });
-  body.querySelectorAll('[data-ra]').forEach(inp => { inp.onchange = () => { TR.rows[+inp.dataset.ra].amt = inp.value; trSave(); trPaint(); }; inp.onkeydown = e => { if (e.key === 'Enter') inp.blur(); }; });
-  body.querySelectorAll('[data-rx]').forEach(b => b.onclick = () => { TR.rows.splice(+b.dataset.rx, 1); if (!TR.rows.length) TR.rows = [{ label: '', amt: 0 }]; trSave(); trPaint(); });
-  $('#trAdd').onclick = () => { TR.rows.push({ label: '', amt: 0 }); trSave(); trPaint(); };
-  $('#trClear').onclick = () => { TR.rows = [{ label: '', amt: 0 }]; TR.target = ''; trSave(); trPaint(); };
-  $('#trTarget').onchange = e => { TR.target = e.target.value; trSave(); trPaint(); };
+    (diff === null ? '' : (Math.abs(diff) < 1 ? '<span class="tg-ok">✓ COCOK — sama dengan kwitansi</span>' : '<span class="tg-bad">✗ Selisih ' + rp(Math.abs(diff)) + (diff > 0 ? ' (kwitansi lebih besar)' : ' (rincian lebih besar)') + '</span>')) + '</div>';
+  box.querySelectorAll('[data-rl]').forEach(inp => inp.onchange = () => { TR.rows[+inp.dataset.rl].label = inp.value; trSave(); });
+  box.querySelectorAll('[data-ra]').forEach(inp => { inp.onchange = () => { TR.rows[+inp.dataset.ra].amt = inp.value; trSave(); trManualPaint(); }; inp.onkeydown = e => { if (e.key === 'Enter') inp.blur(); }; });
+  box.querySelectorAll('[data-rx]').forEach(b => b.onclick = () => { TR.rows.splice(+b.dataset.rx, 1); if (!TR.rows.length) TR.rows = [{ label: '', amt: 0 }]; trSave(); trManualPaint(); });
+  $('#trAdd').onclick = () => { TR.rows.push({ label: '', amt: 0 }); trSave(); trManualPaint(); };
+  $('#trClear').onclick = () => { TR.rows = [{ label: '', amt: 0 }]; TR.target = ''; trSave(); trManualPaint(); };
+  $('#trTarget').onchange = e => { TR.target = e.target.value; trSave(); trManualPaint(); };
   $('#trCopy').onclick = async () => {
     const lines = TR.rows.filter(r => r.label || rfParseAmt(r.amt)).map(r => '- ' + (r.label || '(tanpa nama)') + ': ' + rp(rfParseAmt(r.amt)));
     const txt = 'Rekap tagihan — ' + new Date().toLocaleDateString('id-ID') + '\n' + lines.join('\n') + '\nJumlah: ' + rp(total) + (target ? '\nKwitansi: ' + rp(target) + '\nSelisih: ' + rp(Math.abs(diff || 0)) : '');
