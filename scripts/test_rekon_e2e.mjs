@@ -103,7 +103,8 @@ try {
   await page.click('#tgTabs button[data-t="rekon"]');
   await page.waitForTimeout(200);
   ok(await page.isVisible('text=REKONSILIASI TAGIHAN — PECAH EXCEL PER PENERIMA'), 'kartu utama (pecah Excel) tampil');
-  ok(await page.isVisible('text=LAMPIRAN — COCOKKAN KWITANSI (MANUAL)'), 'lampiran alat lama tetap ada');
+  ok(!(await page.isVisible('text=LAMPIRAN — COCOKKAN KWITANSI (MANUAL)')), 'v1.24.1: kartu lampiran manual TIDAK ada lagi — paritas penuh dgn addon');
+  ok((await page.locator('#trkManual').count()) === 0, '#trkManual dihapus dari DOM');
   ok(await page.isVisible('text=📊 Pilih berkas Excel…'), 'tombol pilih berkas ada');
 
   console.log('== 3. Upload Excel → analisa otomatis ==');

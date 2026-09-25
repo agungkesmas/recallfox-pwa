@@ -253,12 +253,6 @@ a{color:var(--primary)}
 .tg-out{display:flex;gap:10px;align-items:center;background:#10b98114;border:1px solid #10b98155;border-radius:12px;padding:12px 14px;flex-wrap:wrap}
 .tg-out b{color:var(--success)}
 .tg-warn{background:#e29d1f14;border:1px solid #e29d1f55;border-radius:10px;padding:8px 12px;font-size:12px;color:#8a6410}
-.tg-rk{display:flex;flex-direction:column;gap:8px;margin-top:10px}
-.tg-rk-row{display:flex;gap:8px;align-items:center}
-.tg-rk-row input{flex:1}
-.tg-rk-row .rk-amt{max-width:170px;text-align:right;font-variant-numeric:tabular-nums}
-.tg-rk-tot{display:flex;gap:14px;flex-wrap:wrap;border-top:1px solid var(--line2);padding-top:10px;margin-top:6px;font-size:13px}
-.tg-rk-tot b{font-variant-numeric:tabular-nums}
 .tg-ok{color:var(--success);font-weight:800}
 .tg-bad{color:var(--danger);font-weight:800}
 .tg-loading{display:grid;place-items:center;padding:40px;color:var(--subtle);font-weight:600}
@@ -3212,16 +3206,6 @@ function rfEnsurePdf(){
   return rfPdfReady;
 }
 const tgPdfTxt = s => String(s == null ? '' : s).replace(/[^\x20-\x7E\xA0-\xFF]/g, '').slice(0, 80);
-const rp = n => 'Rp ' + (+n || 0).toLocaleString('id-ID');
-function rfParseAmt(s){
-  s = String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
-  const m = s.replace(/\.(?=\d{3}(\D|$))/g, '').match(/([\d,]+(?:\.\d+)?)\s*(jt|juta|rb|ribu|k)?/);
-  if (!m) return 0;
-  let n = parseFloat(String(m[1]).replace(',', '.'));
-  if (isNaN(n)) return 0;
-  if (m[2] === 'jt' || m[2] === 'juta') n *= 1e6; else if (m[2] === 'rb' || m[2] === 'ribu' || m[2] === 'k') n *= 1e3;
-  return Math.round(n);
-}
 
 /* ----- state ----- */
 const TG = { files: [], cur: 0, stage: 'empty', title: '', out: null, cache: new Map(), busy: false };
@@ -3339,9 +3323,6 @@ async function tgCompEstimate(){
 }
 function tgProgress(msg){ const b = $('#tgBody'); if (b) b.innerHTML = '<div class="tg-card"><h3>🔗 MENGGABUNG…</h3><p class="tg-sub">' + esc(msg) + '</p><div class="tg-loading">⏳ Proses 100% di browser — jangan tutup tab ini.</div></div>'; }
 const TU = { on: false, name: '', title: '', bytes: null, doc: null, pages: 0, order: [], out: null, cache: new Map() };
-const TR = { rows: [], target: '' };
-try { const t = JSON.parse(localStorage.getItem('rf-dt-rekons') || 'null'); if (t) { TR.rows = Array.isArray(t.rows) ? t.rows : []; TR.target = String(t.target || ''); } } catch (e) {}
-function trSave(){ try { localStorage.setItem('rf-dt-rekons', JSON.stringify({ rows: TR.rows, target: TR.target })); } catch (e) {} }
 
 /* ================== REKONSILIASI — PECAH EXCEL PER PENERIMA (v1.24.0) ==================
    RESTORASI fitur Rekonsiliasi versi addon (v3.24.10) ke Desktop — paritas 1:1:
@@ -3937,8 +3918,9 @@ async function tuThumbs(){
 }
 
 /* ============================ TAB: REKONSILIASI ============================
-   v1.24.0: fitur utama = PECAH EXCEL PER PENERIMA (restorasi addon v3.24.10,
-   paritas 1:1) + lampiran pencocok kwitansi manual (alat lama, dipertahankan). */
+   v1.24.0: fitur utama = PECAH EXCEL PER PENERIMA (restorasi addon v3.24.10).
+   v1.24.1: paritas penuh dgn addon — kartu lampiran "COCOKKAN KWITANSI
+   (MANUAL)" dihapus dari tab ini (tidak ada di addon; permintaan user). */
 function trPaint(){
   const body = $('#tgBody'); if (!body) return;
   body.innerHTML =
@@ -3948,11 +3930,9 @@ function trPaint(){
     '<div class="tg-actions" style="margin-top:10px"><button class="tg-btn primary" id="trkPick">📊 Pilih berkas Excel…</button></div>' +
     '<div id="trkState" style="margin-top:10px"></div></div>' +
     '<div id="trkResult"></div>' +
-    '<div class="tg-card" style="margin-top:12px" id="trkManual"></div>' +
     '<div class="tg-card" style="margin-top:12px;background:var(--bg)"><span style="font-size:12.5px;line-height:1.6">💡 Rekening yang diberi <b>★</b> tersimpan permanen di browser ini — berikutnya cukup tekan <b>★ Favorit</b> tanpa nyortir ulang setiap bulan.</span></div>';
   $('#trkPick').onclick = () => $('#trkFile').click();
   $('#trkFile').onchange = e => { const f = e.target.files[0]; e.target.value = ''; f && trkHandleFile(f); };
-  trManualPaint();
   if (TRK.analyzed) { trkRenderSummary(); trkRenderList(); trkUpdateBar(); }
 }
 
@@ -4093,40 +4073,6 @@ async function trkDownload(){
     trkUpdateBar();
   }
 }
-
-/* ----- Lampiran tab Rekonsiliasi: pencocok kwitansi manual (alat lama, utuh) ----- */
-function trManualPaint(){
-  const box = $('#trkManual'); if (!box) return;
-  if (!TR.rows.length) TR.rows = [{ label: '', amt: 0 }];
-  const total = TR.rows.reduce((a, r) => a + (rfParseAmt(r.amt) || 0), 0);
-  const target = rfParseAmt(TR.target);
-  const diff = target ? target - total : null;
-  box.innerHTML = '<h3>LAMPIRAN — COCOKKAN KWITANSI (MANUAL)</h3>' +
-    '<p class="tg-sub">Cocokkan <b>jumlah rincian</b> dgn <b>total di kwitansi</b>: masukkan tiap butir (nama + nominal), total dihitung otomatis, selisih tampil langsung. Semua data hanya di browser ini.</p>' +
-    '<div class="tg-rk">' + TR.rows.map((r, i) =>
-      '<div class="tg-rk-row"><input data-rl="' + i + '" value="' + esc(r.label) + '" placeholder="Butir — mis. Obat / Visite dokter">' +
-      '<input data-ra="' + i + '" class="rk-amt" value="' + esc(r.amt || '') + '" placeholder="mis. 250.000">' +
-      '<button class="btn" data-rx="' + i + '" title="Hapus" style="padding:6px 9px;font-size:12px">🗑</button></div>').join('') + '</div>' +
-    '<div class="tg-actions" style="margin-top:10px"><button class="tg-btn" id="trAdd" style="padding:6px 12px;font-size:12px">+ Butir</button>' +
-    '<button class="tg-btn" id="trCopy" style="padding:6px 12px;font-size:12px">📋 Salin rekap</button>' +
-    '<button class="tg-btn" id="trClear" style="padding:6px 12px;font-size:12px">Kosongkan</button></div>' +
-    '<div style="margin-top:12px"><label style="font-size:12px;font-weight:700">Total menurut kwitansi</label>' +
-    '<input id="trTarget" class="rk-amt" style="max-width:240px;display:block;margin-top:4px" value="' + esc(TR.target) + '" placeholder="mis. 1.750.000"></div>' +
-    '<div class="tg-rk-tot"><span>Jumlah rincian: <b>' + rp(total) + '</b></span>' +
-    (diff === null ? '' : (Math.abs(diff) < 1 ? '<span class="tg-ok">✓ COCOK — sama dengan kwitansi</span>' : '<span class="tg-bad">✗ Selisih ' + rp(Math.abs(diff)) + (diff > 0 ? ' (kwitansi lebih besar)' : ' (rincian lebih besar)') + '</span>')) + '</div>';
-  box.querySelectorAll('[data-rl]').forEach(inp => inp.onchange = () => { TR.rows[+inp.dataset.rl].label = inp.value; trSave(); });
-  box.querySelectorAll('[data-ra]').forEach(inp => { inp.onchange = () => { TR.rows[+inp.dataset.ra].amt = inp.value; trSave(); trManualPaint(); }; inp.onkeydown = e => { if (e.key === 'Enter') inp.blur(); }; });
-  box.querySelectorAll('[data-rx]').forEach(b => b.onclick = () => { TR.rows.splice(+b.dataset.rx, 1); if (!TR.rows.length) TR.rows = [{ label: '', amt: 0 }]; trSave(); trManualPaint(); });
-  $('#trAdd').onclick = () => { TR.rows.push({ label: '', amt: 0 }); trSave(); trManualPaint(); };
-  $('#trClear').onclick = () => { TR.rows = [{ label: '', amt: 0 }]; TR.target = ''; trSave(); trManualPaint(); };
-  $('#trTarget').onchange = e => { TR.target = e.target.value; trSave(); trManualPaint(); };
-  $('#trCopy').onclick = async () => {
-    const lines = TR.rows.filter(r => r.label || rfParseAmt(r.amt)).map(r => '- ' + (r.label || '(tanpa nama)') + ': ' + rp(rfParseAmt(r.amt)));
-    const txt = 'Rekap tagihan — ' + new Date().toLocaleDateString('id-ID') + '\n' + lines.join('\n') + '\nJumlah: ' + rp(total) + (target ? '\nKwitansi: ' + rp(target) + '\nSelisih: ' + rp(Math.abs(diff || 0)) : '');
-    try { await navigator.clipboard.writeText(txt); toast('✓ Rekap disalin'); } catch (e) { toast('Gagal: ' + e.message); }
-  };
-}
-
 
 /* ---------- boot glue: pasang strip shalat + shell mobile setelah login ---------- */
 (function rfBootPoll(){
