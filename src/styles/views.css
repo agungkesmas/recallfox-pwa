@@ -890,3 +890,198 @@
   font-size: 10px;
   margin-top: 2px;
 }
+
+/* ============================================================
+   v1.25.0: KAMERA LIVE ALA CAMSCANNER (src/camscanner.js)
+   Viewfinder full-screen + deteksi tepi realtime + auto-capture
+   + crop 4 sudut (loupe) + filter + mode panorama.
+   ============================================================ */
+.cs-root {
+  position: fixed; inset: 0; z-index: 1400;
+  background: #000; color: #fff;
+  display: flex; flex-direction: column;
+  font-family: 'Inter', -apple-system, system-ui, sans-serif;
+  user-select: none; -webkit-user-select: none;
+}
+.cs-top {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: calc(10px + var(--safe-top)) 12px 10px;
+  background: rgba(10,10,10,0.85);
+}
+.cs-tbtn {
+  width: 40px; height: 40px; border-radius: 50%; flex-shrink: 0;
+  background: rgba(255,255,255,0.12); color: #fff; font-size: 17px;
+  display: flex; align-items: center; justify-content: center;
+}
+.cs-tbtn.on { background: var(--amber); color: #1c1917; }
+.cs-tabs {
+  display: flex; gap: 4px; background: rgba(255,255,255,0.1);
+  border-radius: 999px; padding: 4px;
+}
+.cs-tab {
+  padding: 7px 13px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+  color: rgba(255,255,255,0.75); white-space: nowrap;
+}
+.cs-tab.active { background: var(--primary); color: #fff; }
+.cs-stage { flex: 1; position: relative; overflow: hidden; background: #000; }
+.cs-video {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; background: #000;
+}
+.cs-overlay { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
+.cs-flash {
+  position: absolute; inset: 0; background: #fff; opacity: 0;
+  pointer-events: none; z-index: 5;
+}
+.cs-flash.go { animation: csFlashA 0.32s ease-out; }
+@keyframes csFlashA { 0% { opacity: 0.9; } 100% { opacity: 0; } }
+.cs-busy {
+  position: absolute; inset: 0; z-index: 8;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.45);
+}
+.cs-busy-card {
+  background: rgba(20,20,20,0.92); border-radius: 14px;
+  padding: 14px 20px; font-size: 14px; font-weight: 600;
+  display: flex; align-items: center; gap: 8px;
+}
+.cs-guide-band {
+  position: absolute; top: 0; right: 0; bottom: 0; width: 25%;
+  z-index: 3; pointer-events: none;
+  border-left: 2px dashed rgba(255,255,255,0.85);
+  background: rgba(255,255,255,0.06);
+}
+.cs-guide-strip { width: 100%; height: 100%; display: block; }
+.cs-guide-label {
+  position: absolute; bottom: 10px; left: 50%; transform: translateX(-50%);
+  font-size: 10.5px; font-weight: 600; color: #fff; white-space: nowrap;
+  background: rgba(0,0,0,0.55); border-radius: 999px; padding: 4px 10px;
+}
+.cs-hint {
+  padding: 8px 16px; text-align: center; font-size: 12.5px;
+  color: rgba(255,255,255,0.85); background: rgba(10,10,10,0.85);
+}
+.cs-bottom {
+  padding: 10px 16px calc(14px + var(--safe-bottom));
+  background: rgba(10,10,10,0.85);
+}
+.cs-bottom-row {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.cs-bottom-row2 {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  min-height: 34px;
+}
+.cs-sbtn {
+  width: 56px; display: flex; flex-direction: column; align-items: center; gap: 2px;
+  color: #fff; font-size: 22px; opacity: 0.9;
+}
+.cs-sbtn small { font-size: 10.5px; opacity: 0.8; }
+.cs-shutter {
+  width: 74px; height: 74px; border-radius: 50%;
+  background: rgba(255,255,255,0.25);
+  border: 4px solid #fff;
+  display: flex; align-items: center; justify-content: center;
+}
+.cs-shutter:active { transform: scale(0.93); }
+.cs-shutter-ring {
+  width: 56px; height: 56px; border-radius: 50%; background: #fff;
+  transition: transform 0.12s;
+}
+.cs-shutter:active .cs-shutter-ring { transform: scale(0.86); }
+.cs-pill {
+  padding: 7px 14px; border-radius: 999px; font-size: 12px; font-weight: 600;
+  background: rgba(255,255,255,0.12); color: #fff;
+}
+.cs-pill b { color: #35e0a1; }
+.cs-pill-primary { background: var(--primary); }
+.cs-pages-chip {
+  font-size: 12px; font-weight: 600; color: #fff;
+  background: rgba(255,255,255,0.12); border-radius: 999px; padding: 7px 12px;
+}
+
+/* --- Layar sesuaikan (crop 4 sudut) & layar filter --- */
+.cs-adjust, .cs-enhance {
+  position: absolute; inset: 0; z-index: 10;
+  background: #0a0a0a; color: #fff;
+  display: flex; flex-direction: column;
+}
+.cs-adjust-top {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: calc(10px + var(--safe-top)) 12px 10px;
+  background: rgba(10,10,10,0.9);
+}
+.cs-adjust-title { font-weight: 600; font-size: 14.5px; }
+.cs-adjust-stage { flex: 1; position: relative; overflow: hidden; }
+.cs-adjust-img { position: absolute; }
+.cs-adjust-ovl { position: absolute; inset: 0; touch-action: none; }
+.cs-loupe {
+  position: absolute; width: 120px; height: 120px; border-radius: 50%;
+  overflow: hidden; z-index: 20; pointer-events: none;
+  border: 3px solid #35e0a1; box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+  background: #000;
+}
+.cs-loupe canvas { width: 120px; height: 120px; }
+.cs-loupe-cross {
+  position: absolute; top: 50%; left: 50%; width: 16px; height: 2px;
+  background: rgba(255,255,255,0.9); transform: translate(-50%,-50%);
+}
+.cs-loupe-cross::after {
+  content: ''; position: absolute; left: 50%; top: 50%; width: 2px; height: 16px;
+  background: rgba(255,255,255,0.9); transform: translate(-50%,-50%);
+}
+.cs-adjust-actions {
+  display: flex; gap: 10px; padding: 12px 16px calc(14px + var(--safe-bottom));
+  background: rgba(10,10,10,0.9);
+}
+.cs-abtn {
+  flex: 1; padding: 13px 10px; border-radius: 12px; font-size: 14px; font-weight: 700;
+  background: rgba(255,255,255,0.12); color: #fff; text-align: center;
+}
+.cs-abtn-primary { background: var(--primary); }
+.cs-enhance-stage { flex: 1; position: relative; display: flex; align-items: center; justify-content: center; overflow: hidden; padding: 6px; }
+.cs-enhance-img { max-width: 100%; max-height: 100%; border-radius: 6px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+.cs-enhance-ctrl {
+  padding: 10px 14px calc(12px + var(--safe-bottom));
+  background: rgba(10,10,10,0.9); border-top: 1px solid rgba(255,255,255,0.08);
+}
+.cs-chips { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 8px; }
+.cs-chip {
+  flex-shrink: 0; padding: 8px 14px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+  background: rgba(255,255,255,0.1); color: #fff;
+}
+.cs-chip.active { background: var(--primary); }
+.cs-slider-row {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 12.5px; color: rgba(255,255,255,0.85); padding: 4px 0;
+}
+.cs-slider { flex: 1; accent-color: var(--primary-light); }
+
+/* --- Sheet simpan dokumen --- */
+.cs-sheet-wrap { position: absolute; inset: 0; z-index: 30; }
+.cs-sheet-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.6); }
+.cs-sheet {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  background: #17151d; border-radius: 20px 20px 0 0;
+  padding: 18px 18px calc(18px + var(--safe-bottom));
+  display: flex; flex-direction: column; gap: 10px;
+}
+.cs-sheet h3 { font-size: 16px; font-weight: 700; }
+.cs-input {
+  width: 100%; padding: 11px 14px; border-radius: 10px; font-size: 14px;
+  background: rgba(255,255,255,0.08); color: #fff;
+  border: 1px solid rgba(255,255,255,0.18);
+}
+.cs-sheet-thumbs { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0; }
+.cs-sheet-thumb {
+  position: relative; flex-shrink: 0; width: 52px; height: 68px;
+  border-radius: 8px; overflow: hidden; background: rgba(255,255,255,0.08);
+}
+.cs-sheet-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.cs-sheet-thumb span {
+  position: absolute; bottom: 2px; right: 4px; font-size: 10px; font-weight: 700;
+  color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+}
+.cs-sheet-actions { display: flex; gap: 10px; margin-top: 4px; }
+.cs-toast { position: fixed; z-index: 1500; }

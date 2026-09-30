@@ -8,6 +8,9 @@ import { deleteVaultItem, getOrDownloadScreenshotBlob, createScreenshotItem, cre
 import { buildScreenshotCaption, buildBatchCaption, writeScreenshotToClipboard } from '../copy-format.js';
 import { dbGetAllVaultItems } from '../db.js';
 import { pickImage, pasteFromClipboard } from '../capture.js';
+// v1.25.0: kamera live ala CamScanner + GPS live utk alur kamera baru
+import { openCameraScanner } from '../camscanner.js';
+import { captureLocation } from '../lib/location.js';
 import { openAnnotateEditor } from '../annotate.js';
 import { openDocumentEditor } from '../document.js';
 import { openDocumentEditorMultiPage } from '../document-editor-v14.js';
@@ -563,10 +566,27 @@ async function doBatchDelete() {
 }
 
 // ===== Capture flow (dipanggil dari FAB menu) =====
-export async function startCaptureFlow(source, onDone) {
+// v1.25.0: source 'camera' kini BUKA KAMERA LIVE ala CamScanner (openCameraScanner,
+// mode 'photo'; opts.panorama → mode 'pano'). Fallback ke pickImage (kamera HP)
+// bila getUserMedia gagal (izin ditolak / tanpa kamera / konteks tidak aman).
+// opts.legacy=1 memaksa alur lama (dipakai sbg jalan darurat).
+export async function startCaptureFlow(source, onDone, opts = {}) {
   let picked = null;
+  // v1.8.2/v1.25.0: GPS live dijalankan PARALEL dgn kamera supaya tidak menunda
+  const locPromise = source === 'camera' ? captureLocation().catch(() => null) : null;
   try {
-    if (source === 'camera' || source === 'gallery') {
+    if (source === 'camera' && !opts.legacy) {
+      const cam = await openCameraScanner({ mode: opts.panorama ? 'pano' : 'photo' });
+      if (cam.cancelled && cam.fallback) {
+        showToast('Kamera live tidak tersedia — pakai kamera HP');
+        picked = await pickImage('camera');
+      } else if (cam.cancelled) {
+        return;
+      } else {
+        picked = { dataUrl: cam.dataUrl, width: cam.width, height: cam.height, location: null, file: null };
+        picked.location = locPromise ? await locPromise : null;
+      }
+    } else if (source === 'camera' || source === 'gallery') {
       picked = await pickImage(source);
     } else if (source === 'paste') {
       picked = await pasteFromClipboard();
@@ -647,10 +667,30 @@ export async function startCaptureFlow(source, onDone) {
 
 // ===== v1.3.0: Document flow (CamScanner-like) =====
 // Dipanggil dari FAB menu → option "Scan Dokumen"
+// v1.25.0: source 'camera' kini BUKA KAMERA LIVE ala CamScanner (deteksi tepi
+// realtime + auto-capture + crop 4 sudut + filter) — halaman olahan langsung
+// disimpan. Fallback: alur lama pickImage → openDocumentEditorMultiPage.
 export async function startDocumentFlow(source, onDone) {
   let picked = null;
+  let camDoc = null; // hasil kamera live: { pages, title, note }
+  const locPromise = source === 'camera' ? captureLocation().catch(() => null) : null;
   try {
-    if (source === 'camera' || source === 'gallery') {
+    if (source === 'camera') {
+      let cam = null;
+      try {
+        cam = await openCameraScanner({ mode: 'doc' });
+      } catch (camErr) {
+        console.warn('[RecallFox] camscanner error:', camErr);
+      }
+      if (cam && cam.cancelled && cam.fallback) {
+        showToast('Kamera live tidak tersedia — pakai kamera HP');
+        picked = await pickImage('camera');
+      } else if (cam && cam.cancelled) {
+        return;
+      } else if (cam) {
+        camDoc = cam;
+      }
+    } else if (source === 'gallery') {
       picked = await pickImage(source);
     } else if (source === 'paste') {
       picked = await pasteFromClipboard();
@@ -660,6 +700,15 @@ export async function startDocumentFlow(source, onDone) {
     showToast('Gagal memuat gambar: ' + e.message, true);
     return;
   }
+
+  // v1.25.0: hasil kamera live → langsung simpan (halaman sudah diolah:
+  // tepi → warp perspektif → filter). GPS dari lokasi live paralel.
+  if (camDoc) {
+    const location = locPromise ? await locPromise : null;
+    await saveDocumentPages(camDoc.pages, camDoc.title, camDoc.note, location, onDone);
+    return;
+  }
+
   if (!picked) return;
 
   // v1.8.2: GPS indicator untuk document flow juga
@@ -682,7 +731,12 @@ export async function startDocumentFlow(source, onDone) {
   }
   if (docRes.cancelled || !docRes.pages || docRes.pages.length === 0) return;
 
-  showToast(`Menyimpan ${docRes.pages.length} halaman...`);
+  await saveDocumentPages(docRes.pages, docRes.title, docRes.note, picked.location, onDone);
+}
+
+// v1.25.0: ekstraksi ekor alur simpan dokumen (dipakai kamera live & editor lama)
+async function saveDocumentPages(pages, title, note, location, onDone) {
+  showToast(`Menyimpan ${pages.length} halaman...`);
 
   if (!window.__rfUser) {
     showToast('Sesi habis. Login ulang.', true);
@@ -691,14 +745,14 @@ export async function startDocumentFlow(source, onDone) {
 
   try {
     const res = await createDocumentItemMultiPage(window.__rfUser, {
-      pages: docRes.pages,
-      title: docRes.title,
-      note: docRes.note,
-      location: picked.location || null  // v1.8.2: PASS location ke sync
+      pages,
+      title,
+      note,
+      location: location || null
     });
     console.log('[RecallFox] createDocumentItemMultiPage result:', res);
     if (res.ok) {
-      showToast(`✓ ${docRes.pages.length} halaman tersimpan & tersinkron`);
+      showToast(`✓ ${pages.length} halaman tersimpan & tersinkron`);
     } else {
       showToast('⚠ Tersimpan lokal — sync cloud gagal: ' + (res.upsertError || 'unknown'), true);
     }

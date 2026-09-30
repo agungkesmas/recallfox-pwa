@@ -361,6 +361,7 @@ function openFabMenu() {
       <button class="sheet-btn" data-action="camera"><span class="sheet-ic">📷</span>Ambil Foto</button>
       <button class="sheet-btn" data-action="gallery"><span class="sheet-ic">🖼️</span>Dari Galeri</button>
       <button class="sheet-btn" data-action="document"><span class="sheet-ic">📄</span>Scan Dokumen</button>
+      <button class="sheet-btn" data-action="panorama"><span class="sheet-ic">🌐</span>Foto Panorama</button>
       <button class="sheet-btn" data-action="paste"><span class="sheet-ic">📋</span>Paste dari Clipboard</button>
       <button class="sheet-btn" data-action="upload-file"><span class="sheet-ic">📎</span>Upload File</button>
       <button class="sheet-btn" data-action="note"><span class="sheet-ic">📝</span>Catatan Baru</button>
@@ -379,6 +380,7 @@ function openFabMenu() {
     if (action === 'camera') startCaptureFlow('camera');
     else if (action === 'gallery') startCaptureFlow('gallery');
     else if (action === 'document') startDocumentFlow('camera');
+    else if (action === 'panorama') startCaptureFlow('camera', null, { panorama: true }); // v1.25.0: mode panorama
     else if (action === 'paste') startCaptureFlow('paste');
     else if (action === 'upload-file') openFileUploadSheet();
     else if (action === 'note') { navigateTo('notes'); setTimeout(openNoteEditor, 100); }

@@ -233,17 +233,19 @@ function dist(a, b) {
 
 /**
  * Order 4 points: TL, TR, BR, BL.
- * Algorithm: sum(x+y) min = TL, max = BR; diff(y-x) min = BL, max = TR.
+ * Algorithm: sum(x+y) min = TL, max = BR; dari 2 sisanya diff (y-x)
+ * MIN = TR (y kecil, x besar), MAX = BL (y besar, x kecil).
+ * v1.25.0 FIX: sebelumnya bl/tr tertukar → quad bowtie → warp salah.
  */
 function orderPoints(pts) {
   const sorted = [...pts];
   sorted.sort((a, b) => (a.x + a.y) - (b.x + b.y));
   const tl = sorted[0];
   const br = sorted[3];
-  // Dari 2 sisanya, diff (y - x) min = BL, max = TR
+  // Dari 2 sisanya, diff (y - x) min = TR, max = BL
   const rest = [sorted[1], sorted[2]];
   rest.sort((a, b) => (a.y - a.x) - (b.y - b.x));
-  const bl = rest[0];
-  const tr = rest[1];
+  const tr = rest[0];
+  const bl = rest[1];
   return [tl, tr, br, bl];
 }
