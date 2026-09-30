@@ -274,6 +274,84 @@ section('UTIL QUAD');
   ok(quadConvex(bow) === false, 'quadConvex: bowtie terdeteksi tak convex');
 }
 
+// ---------- 7. REGRESI v1.25.1 (laporan user: "panorama gagal, cuma 1 foto") ----------
+section('PANORAMA REGRESI v1.25.1');
+{
+  // (a) EXPOSURE SHIFT — auto-exposure HP mengubah gain/offset antar frame;
+  //     SAD mentah v1.25.0 gagal total pada shift +8%, ZSAD harus tetap cocok
+  const FW = 427, FH = 240;
+  // tekstur REALISTIS: blob halus (frekuensi rendah) + noise kecil — foto asli
+  // tidak iid per-piksel, 1px shift masih berkorelasi (basin SAD landai)
+  const mkTex = (w, h, seed) => {
+    const g = new Uint8Array(w * h);
+    let s = seed;
+    const rnd = () => (s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const smooth = 130
+        + 45 * Math.sin(x / 23 + seed) * Math.sin(y / 17 + seed * 0.7)
+        + 25 * Math.sin((x + y) / 9 + seed * 1.3);
+      g[y * w + x] = Math.max(0, Math.min(255, Math.round(smooth + (rnd() - 0.5) * 12)));
+    }
+    return g;
+  };
+  const world = mkTex(FW + 900, FH, 7); // "dunia" lebar
+  const crop = (sx) => {
+    const g = new Uint8Array(FW * FH);
+    for (let y = 0; y < FH; y++) for (let x = 0; x < FW; x++) g[y * FW + x] = world[y * (FW + 900) + sx + x];
+    return g;
+  };
+  const shiftExp = (g, gain, off) => g.map(v => Math.max(0, Math.min(255, v * gain + off)));
+  const f1 = crop(0);
+  const f2 = shiftExp(crop(120), 1.08, 6);   // scene +12px, exposure beda (gain+offset)
+  const mE = matchPanorama(
+    { gray: f1, width: FW, height: FH },
+    { gray: f2, width: FW, height: FH }
+  );
+  ok(!!mE, 'regresi (a): match dengan exposure shift +8%/+6 tetap ditemukan', JSON.stringify(mE));
+  if (mE) ok(Math.abs(mE.overlap - 307) <= 6, `regresi (a): overlap tepat 307 (dapat ${mE.overlap})`);
+  const f2hard = shiftExp(crop(120), 1.35, -20); // shift ekstrem +35%
+  const mH = matchPanorama(
+    { gray: f1, width: FW, height: FH },
+    { gray: f2hard, width: FW, height: FH }
+  );
+  ok(!!mH && Math.abs(mH.overlap - 307) <= 6, 'regresi (a): shift ekstrem +35% tetap cocok', JSON.stringify(mH));
+
+  // (b) TEMPLATE CAP — akumulasi sudah lebar (frame 4+): template 25% × lebar
+  //     pano dulu MELAMPAUI lebar frame → null permanen. Sekarang di-cap 45% next.
+  const accW = 1400; // pano lebar @240 tinggi (≈6 frame 4:3)
+  const accTex = mkTex(accW, FH, 21);
+  const fN = crop(1380 - 300); // frame baru: overlap 300px dgn ujung kanan pano
+  const fNg = new Uint8Array(FW * FH);
+  for (let y = 0; y < FH; y++) for (let x = 0; x < FW; x++) {
+    const srcX = accW - 300 + x;
+    fNg[y * FW + x] = (srcX < accW) ? accTex[y * accW + srcX] : (120 + ((x * 13 + y * 7) % 60));
+  }
+  const mW = matchPanorama(
+    { gray: accTex, width: accW, height: FH },
+    { gray: fNg, width: FW, height: FH }
+  );
+  ok(!!mW, 'regresi (b): pano lebar 1400px vs frame 427px tetap bisa match', JSON.stringify(mW));
+  if (mW) ok(Math.abs(mW.overlap - 300) <= 8, `regresi (b): overlap 300 benar (dapat ${mW.overlap})`);
+
+  // (c) OVERLAP 30% (dulu: 70% batas cari → posisi 200px tak terjangkau & SALAH).
+  //     Catatan kontrak: overlap harus ≥ lebar template (T=107 @240 skala) —
+  //     mode sweep kontinyu selalu menghasilkan overlap 50-80% jauh di atas ini.
+  const f3 = crop(FW - 130); // overlap 130px
+  const mS = matchPanorama(
+    { gray: f1, width: FW, height: FH },
+    { gray: f3, width: FW, height: FH }
+  );
+  ok(!!mS && Math.abs(mS.overlap - 130) <= 6, 'regresi (c): overlap 130px ketemu tepat (rentang cari 88%)', JSON.stringify(mS));
+
+  // (d) dinding kosong (tekstur polos) → null, jangan match bodong
+  const flat = new Uint8Array(FW * FH).fill(180);
+  const mF = matchPanorama(
+    { gray: flat, width: FW, height: FH },
+    { gray: flat.slice(), width: FW, height: FH }
+  );
+  ok(mF === null, 'regresi (d): template polos (dinding) → null (tak bisa dicocokkan)');
+}
+
 console.log(`\n========================================`);
 console.log(`TOTAL: ${pass} PASS, ${fail} FAIL dari ${pass + fail}`);
 process.exit(fail > 0 ? 1 : 0);

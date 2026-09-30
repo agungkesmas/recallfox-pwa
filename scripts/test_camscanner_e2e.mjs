@@ -109,7 +109,7 @@ try {
   await page.screenshot({ path: '/home/z/my-project/download/camscanner-viewfinder.png' });
   ok(true, 'screenshot viewfinder tersimpan');
 
-  console.log('== 3. Ganti mode Panorama ==');
+  console.log('== 3. Ganti mode Panorama + uji SWEEP kontinyu (v1.25.1) ==');
   await page.click('.cs-tab[data-mode="pano"]');
   const active2 = await page.locator('.cs-tab.active').textContent();
   ok(/Panorama/.test(active2), 'tab aktif pindah → Panorama');
@@ -118,11 +118,22 @@ try {
   ok(await page.locator('.cs-pill[data-act="auto"]').isVisible().catch(() => false) === false, 'pill auto disembunyikan di mode panorama');
   await page.screenshot({ path: '/home/z/my-project/download/camscanner-panorama.png' });
 
-  console.log('== 4. Tutup kamera ==');
+  // v1.25.1: tekan jepret = MULAI sweep (rekam otomatis), bukan jepret sekali
+  await page.click('.cs-shutter');
+  await page.waitForTimeout(600);
+  ok(await page.locator('.cs-shutter.sweeping').count() === 1, 'jepret → mode sweeping (tombol jadi STOP)');
+  const hint3 = await page.locator('#csHintText').textContent();
+  ok(/Merekam|tersambung|geser/i.test(hint3), 'hint saat sweep: ' + hint3);
+  await page.waitForTimeout(1200); // 2-3 tick rekam (kamera statis → frame skip, tak error)
+  const chipTxt = await page.locator('#csPagesChip').textContent().catch(() => '');
+  ok(/frame/.test(chipTxt || ''), 'chip progres panorama tampil: ' + (chipTxt || '').trim());
+  await page.screenshot({ path: '/home/z/my-project/download/camscanner-pano-sweep.png' });
+
+  console.log('== 4. Tutup kamera (saat sweep aktif — harus berhenti bersih) ==');
   page.once('dialog', d => d.accept().catch(() => { }));
   await page.click('.cs-top [data-act="close"]');
   await page.waitForFunction(() => !document.querySelector('.cs-root'), null, { timeout: 8000 });
-  ok(true, 'kamera tertutup bersih (.cs-root hilang)');
+  ok(true, 'kamera tertutup bersih (.cs-root hilang, sweep terhenti)');
 
   const crit = pageErrors.filter(e => !/ResizeObserver|Non-Error promise|AbortError|NotAllowedError/i.test(e));
   ok(crit.length === 0, '0 pageerror kritis ' + (crit.length ? '→ ' + crit[0].slice(0, 120) : ''));

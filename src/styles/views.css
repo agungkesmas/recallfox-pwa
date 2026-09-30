@@ -990,6 +990,11 @@
   transition: transform 0.12s;
 }
 .cs-shutter:active .cs-shutter-ring { transform: scale(0.86); }
+/* v1.25.1: mode sweep panorama — jepret berubah jadi tombol STOP (kotak merah) */
+.cs-shutter.sweeping { border-color: #ef4444; }
+.cs-shutter.sweeping .cs-shutter-ring {
+  width: 30px; height: 30px; border-radius: 6px; background: #ef4444;
+}
 .cs-pill {
   padding: 7px 14px; border-radius: 999px; font-size: 12px; font-weight: 600;
   background: rgba(255,255,255,0.12); color: #fff;

@@ -572,51 +572,88 @@ export function applyFilterImg(filterId, img) {
 /**
  * Cari posisi overlap frame `next` terhadap akumulasi `prev`.
  * prev/next = { gray: Uint8Array, width, height } SKALA SAMA (caller resize).
- * Template = kolom kanan 25% dari prev; dicari di sisi kiri 70% dari next.
+ * Template = kolom kanan prev (lebar DI-CAP); dicari di sisi kiri next.
+ *
+ * v1.25.1 — 3 perbaikan atas laporan user "panorama gagal, cuma 1 foto":
+ *   1. ZSAD (zero-mean SAD): skor |(p-mp)-(n-mn)| — KEBAL PERUBAHAN EXPOSURE
+ *      (auto-exposure HP menggeser gain/offset antar frame; SAD mentah v1.25.0
+ *      gagal total bahkan pada shift +8%).
+ *   2. Lebar template DI-CAP: min(25% prev, 45% next, 150px) — dulu 25% × lebar
+ *      akumulasi yang MEMBESAR TERUS → melampaui lebar frame baru → match mati
+ *      permanen setelah beberapa frame.
+ *   3. Rentang cari ox sampai 88% lebar frame (dulu 70% → overlap <30% tak
+ *      pernah ketemu, malah terpilih posisi SALAH).
+ *   + Guard: template terlalu polos (std < 14, dinding kosong) → null.
  * @returns {{overlap:number, dy:number, score:number} | null} overlap & dy
  *   dalam satuan piksel skala tersebut. null = tidak yakin cocok.
  */
 export function matchPanorama(prev, next) {
   const pw = prev.width, ph = prev.height, nw = next.width, nh = next.height;
-  const T = Math.max(40, Math.round(pw * 0.25));
-  if (T >= nw - 10 || ph < 40) return null;
-  const maxOx = Math.min(nw - T, Math.round(nw * 0.70) - T);
+  const T = Math.max(36, Math.min(Math.round(pw * 0.25), Math.round(nw * 0.45), 150));
+  if (T >= nw - 8 || ph < 40) return null;
+  const maxOx = Math.min(nw - T, Math.round(nw * 0.88) - T);
   if (maxOx < 4) return null;
-  const maxDy = Math.round(Math.min(ph, nh) * 0.12);
-
+  const maxDy = Math.round(Math.min(ph, nh) * 0.15);
   const pg = prev.gray, ng = next.gray;
-  // Pre-sum template utk normalisasi
-  let best = null;
+
+  // Mean template (dihitung sekali) + guard tekstur polos
+  let tSum = 0, tCnt = 0;
+  for (let ty = 0; ty < ph; ty += 2) {
+    for (let tx = 0; tx < T; tx += 2) { tSum += pg[ty * pw + (pw - T + tx)]; tCnt++; }
+  }
+  const mp = tSum / Math.max(1, tCnt);
+  let tVar = 0;
+  for (let ty = 0; ty < ph; ty += 2) {
+    for (let tx = 0; tx < T; tx += 2) { const d = pg[ty * pw + (pw - T + tx)] - mp; tVar += d * d; }
+  }
+  if (Math.sqrt(tVar / Math.max(1, tCnt)) < 14) return null; // dinding kosong
+
+  function zsad(ox, oy) {
+    // pass 1: mean frame kandidat (zero-mean buang gain/offset exposure)
+    let sp = 0, sn = 0, cnt = 0;
+    for (let ty = 0; ty < ph; ty += 2) {
+      const ny = oy + ty;
+      if (ny < 0 || ny >= nh) continue;
+      for (let tx = 0; tx < T; tx += 2) {
+        sp += pg[ty * pw + (pw - T + tx)];
+        sn += ng[ny * nw + ox + tx];
+        cnt++;
+      }
+    }
+    if (cnt < tCnt * 0.6) return 999; // mayoritas template keluar frame
+    const mn = sn / cnt;
+    let sad = 0;
+    for (let ty = 0; ty < ph; ty += 2) {
+      const ny = oy + ty;
+      if (ny < 0 || ny >= nh) continue;
+      for (let tx = 0; tx < T; tx += 2) {
+        const p = pg[ty * pw + (pw - T + tx)];
+        const n = ng[ny * nw + ox + tx];
+        sad += Math.abs((p - mp) - (n - mn));
+      }
+    }
+    return sad / cnt;
+  }
+
   const coarse = 2, fine = 1;
+  let best = null;
   function scan(ox0, ox1, oy0, oy1, step, cur) {
     for (let ox = ox0; ox <= ox1; ox += step) {
       for (let oy = Math.max(-maxDy, oy0); oy <= Math.min(maxDy, oy1); oy += step) {
-        let sad = 0, cnt = 0;
-        // sampling setiap 2px utk kecepatan (cukup akurat dgn refine)
-        for (let ty = 0; ty < ph; ty += 2) {
-          const ny = oy + ty;
-          if (ny < 0 || ny >= nh) { sad += 400; cnt += 1; continue; }
-          for (let tx = 0; tx < T; tx += 2) {
-            const p = pg[(ty * pw) + (pw - T + tx)];
-            const n = ng[(ny * nw) + ox + tx];
-            sad += Math.abs(p - n);
-            cnt++;
-          }
-        }
-        const score = sad / Math.max(1, cnt);
+        const score = zsad(ox, oy);
         if (!cur || score < cur.score) cur = { ox, oy, score };
       }
     }
     return cur;
   }
   best = scan(0, maxOx, -maxDy, maxDy, coarse, null);
-  if (!best) return null;
-  best = scan(Math.max(0, best.ox - coarse), Math.min(maxOx, best.ox + coarse),
-    best.oy - coarse, best.oy + coarse, fine, best);
+  if (!best || best.score >= 999) return null;
+  best = scan(Math.max(0, best.ox - 3), Math.min(maxOx, best.ox + 3),
+    best.oy - 3, best.oy + 3, fine, best);
   const overlap = Math.round(best.ox + T);
   const dy = Math.round(best.oy);
   if (Math.abs(dy) > maxDy) return null;
-  if (best.score > 22) return null; // tidak cocok → minta frame lebih overlap
+  if (best.score > 13) return null; // ZSAD: cocok ≈ 0-6; acak/beda scene ≈ >18
   return { overlap, dy, score: Math.round(best.score * 10) / 10 };
 }
 

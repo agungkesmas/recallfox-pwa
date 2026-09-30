@@ -1,4 +1,4 @@
-// src/camscanner.js — Kamera live full-screen ala CamScanner (v1.25.0)
+// src/camscanner.js — Kamera live full-screen ala CamScanner (v1.25.1)
 //
 // PERILAKU YANG DITIRU DARI CAMSCANNER (dipelajari: UI, perilaku, hasil):
 //   1. VIEWFINDER LIVE: kamera full-screen, polygon tepi kertas terdeteksi
@@ -11,8 +11,10 @@
 //      Magic, Asli, Gray, B&W + slider Kecerahan/Kontras. Preview instan.
 //   5. MULTI-HALAMAN: selesai satu halaman → balik ke viewfinder, halaman
 //      bertambah; "Selesai" → judul+catatan → simpan (N halaman).
-//   6. MODE PANORAMA: panduan pita alignment di kanan layar, jepret bertahap,
-//      stitch otomatis (template match) → foto jadi LEBAR.
+//   6. MODE PANORAMA v1.25.1: SWEEP KONTINYU ala kamera native — tekan jepret
+//      SEKALI, kamera merekam otomatis tiap 450ms sambil HP digeser KANAN,
+//      tiap frame disambung live (ZSAD tahan perubahan exposure); tekan lagi
+//      = selesai. Tidak perlu jepret-jepret manual lagi (gagal total di v1.25.0).
 //   7. Torch (lampu), ganti kamera depan/belakang, impor dari galeri.
 //   8. Output JPEG q0.92 RESOLUSI PENUH — hanya 1x re-encode di akhir, teks
 //      TIDAK hilang (filter baru: B&W window adaptif proporsional, Enhance
@@ -31,6 +33,7 @@ const MAX_PAGES = 10;
 const WARP_CAP = 3200;       // sisi panjang maks output dokumen
 const PANO_H = 1080;         // tinggi kerja panorama
 const PANO_MAX_W = 10000;    // batas lebar panorama (jaga memori)
+const PANO_TICK = 450;       // interval rekam sweep panorama (ms)
 const LS_AUTO = 'rf-cam-auto';
 
 export function openCameraScanner(opts = {}) {
@@ -44,6 +47,9 @@ export function openCameraScanner(opts = {}) {
     let lastDetSize = { w: 0, h: 0 };
     let stableCount = 0;
     let detTimer = null, busy = false, finished = false;
+    let streamReadyAt = 0;                // tunggu auto-exposure settle (ms epoch)
+    let torchHinted = false, darkHintAt = 0, slowHintAt = 0;
+    let panoSweep = false, panoTimer = null; // v1.25.1: sweep kontinyu
     let autoMode = '1';
     try { autoMode = localStorage.getItem(LS_AUTO) || '1'; } catch (e) { /* */ }
     const pages = [];                     // doc: {dataUrl, filter, width, height}
@@ -70,7 +76,7 @@ export function openCameraScanner(opts = {}) {
         <canvas class="cs-overlay"></canvas>
         <div class="cs-guide-band" style="display:none">
           <canvas class="cs-guide-strip"></canvas>
-          <div class="cs-guide-label">◀ geser sampai sambung</div>
+          <div class="cs-guide-label">◀ samakan dengan bayangan ini</div>
         </div>
         <div class="cs-flash"></div>
         <div class="cs-busy" style="display:none"><div class="cs-busy-card">⏳ <span>Memproses…</span></div></div>
@@ -137,7 +143,9 @@ export function openCameraScanner(opts = {}) {
         finishBtn.style.display = pages.length ? '' : 'none';
       } else if (mode === 'pano') {
         pagesChip.style.display = panoAcc ? '' : 'none';
-        pagesChip.textContent = `🌐 ${panoFrames.length} frame`;
+        pagesChip.textContent = panoAcc
+          ? `🌐 ${panoFrames.length} frame · ${panoAcc.width}×${panoAcc.height}px`
+          : '';
         finishBtn.style.display = panoAcc ? '' : 'none';
       } else {
         pagesChip.style.display = 'none';
@@ -145,6 +153,7 @@ export function openCameraScanner(opts = {}) {
       }
     }
     function setMode(m) {
+      if (mode === 'pano' && m !== 'pano' && panoSweep) stopPanoSweep(false);
       mode = m;
       root.querySelectorAll('.cs-tab').forEach(t => t.classList.toggle('active', t.dataset.mode === m));
       guideBand.style.display = 'none';
@@ -153,21 +162,22 @@ export function openCameraScanner(opts = {}) {
       hintText.textContent = m === 'doc'
         ? 'Arahkan ke dokumen — tepi terdeteksi otomatis'
         : m === 'pano'
-          ? 'Jepret frame pertama, lalu geser KANAN perlahan'
+          ? 'Tekan jepret SEKALI lalu geser KANAN perlahan — tekan lagi utk selesai'
           : 'Jepret seperti biasa — hasil langsung disimpan';
-      if (m === 'doc' && panoAcc) { /* keep */ }
       overlayCtx.clearRect(0, 0, overlayCv.width, overlayCv.height);
       liveQuad = null; stableCount = 0;
     }
 
     async function startStream() {
       stopStream();
+      // v1.25.1: 1920×1080 (dulu 2560×1440 — di banyak HP memicu mode HDR/berat
+      // dgn exposure buruk; 1080p lebih terang, cepat, cukup utk dokumen & pano)
       stream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
           facingMode: { ideal: facing },
-          width: { ideal: 2560 },
-          height: { ideal: 1440 }
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
         }
       });
       track = stream.getVideoTracks()[0] || null;
@@ -178,6 +188,14 @@ export function openCameraScanner(opts = {}) {
       torchBtn.style.display = torchCapable ? '' : 'none';
       video.srcObject = stream;
       await video.play().catch(() => { /* autoplay guard */ });
+      // v1.25.1: paksa auto-exposure/AWB kontinyu (beberapa HP mulai dgn exposure
+      // terkunci → hasil gelap gulita) — abaikan bila browser tak dukung
+      try {
+        await track.applyConstraints({ advanced: [
+          { exposureMode: 'continuous' }, { whiteBalanceMode: 'continuous' }
+        ] });
+      } catch (e) { /* opsional */ }
+      streamReadyAt = Date.now() + 700; // beri waktu AE settle sebelum auto-jepret
     }
     async function toggleTorch() {
       if (!track || !torchCapable) return;
@@ -229,6 +247,7 @@ export function openCameraScanner(opts = {}) {
     const detCtx = detCv.getContext('2d', { willReadFrequently: true });
     function detectionTick() {
       if (finished || busy || mode !== 'doc' || !video.videoWidth) return;
+      if (Date.now() < streamReadyAt) return; // v1.25.1: tunggu auto-exposure settle
       const vw = video.videoWidth, vh = video.videoHeight;
       const scale = 260 / Math.max(vw, vh);
       const dw = Math.max(32, Math.round(vw * scale));
@@ -237,6 +256,25 @@ export function openCameraScanner(opts = {}) {
       try { detCtx.drawImage(video, 0, 0, dw, dh); } catch (e) { return; }
       let img;
       try { img = detCtx.getImageData(0, 0, dw, dh); } catch (e) { return; }
+      // v1.25.1 GUARD GELAP: scene nyaris hitam → deteksi tepi = noise bodong;
+      // jangan deteksi/jepret, ajak tambah cahaya / torch
+      const gdet = makeGray(img);
+      let gsum = 0;
+      for (let i = 0; i < gdet.length; i++) gsum += gdet[i];
+      const frameMean = gsum / gdet.length;
+      if (frameMean < 45) {
+        liveQuad = null; stableCount = 0; drawOverlay();
+        if (Date.now() - darkHintAt > 3000) {
+          darkHintAt = Date.now();
+          hintText.textContent = '🌑 Terlalu gelap — tambah cahaya'
+            + (torchCapable ? ' atau ketuk ⚡ kanan atas' : '');
+          if (!torchHinted && torchCapable) {
+            torchHinted = true;
+            showToast('⚡ Ketuk ikon kilat untuk menyalakan lampu');
+          }
+        }
+        return;
+      }
       const res = detectQuad(img);
       const inv = 1 / scale;
       if (res && res.confidence >= 0.35) {
@@ -248,8 +286,12 @@ export function openCameraScanner(opts = {}) {
           stableCount = dmax < 0.025 * Math.max(dw, dh) ? stableCount + 1 : 0;
         } else stableCount = 0;
         liveQuad = q;
-        // AUTO-CAPTURE ala CamScanner: stabil ±1,2 detik + yakin → jepret
-        if (autoMode === '1' && stableCount >= 3 && res.confidence >= 0.5) {
+        // v1.25.1: kertas harus LEBIH TERANG dari sekelilingnya — cegah
+        // auto-jepret pada quad bodong di area gelap (hasil warp = gelap gulita)
+        const paperBright = quadBboxBrighter(gdet, dw, dh, res.points, frameMean);
+        // AUTO-CAPTURE ala CamScanner: stabil ±1,2 detik + yakin + kertas terang → jepret
+        if (autoMode === '1' && stableCount >= 3 && res.confidence >= 0.5 && paperBright
+            && Date.now() >= streamReadyAt) {
           stableCount = 0;
           liveQuad = null;
           doShutter(true);
@@ -271,16 +313,73 @@ export function openCameraScanner(opts = {}) {
     }
     function canvasToUrl(cv, q = 0.95) { return cv.toDataURL('image/jpeg', q); }
 
+    /** v1.25.1: mean luma cepat (canvas 48×27) — guard frame hitam */
+    function quickMean(cv) {
+      try {
+        const c = document.createElement('canvas');
+        c.width = 48; c.height = 27;
+        const cx = c.getContext('2d', { willReadFrequently: true });
+        cx.drawImage(cv, 0, 0, 48, 27);
+        const d = cx.getImageData(0, 0, 48, 27).data;
+        let s = 0;
+        for (let i = 0; i < d.length; i += 4) s += (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+        return s / (d.length / 4);
+      } catch (e) { return 255; }
+    }
+    /** v1.25.1: guard frame hitam — video belum ready/exposure belum jalan/HDR
+     *  iOS drawImage gelap → tunggu + retry, terakhir coba createImageBitmap */
+    async function grabFrameGuarded() {
+      let cv = grabFrame();
+      for (let i = 0; i < 4 && quickMean(cv) < 8; i++) {
+        await new Promise(r => setTimeout(r, 280));
+        cv = grabFrame();
+      }
+      if (quickMean(cv) < 8) {
+        try {
+          const bmp = await createImageBitmap(video);
+          const c2 = document.createElement('canvas');
+          c2.width = bmp.width; c2.height = bmp.height;
+          c2.getContext('2d').drawImage(bmp, 0, 0);
+          if (bmp.close) bmp.close();
+          if (quickMean(c2) >= 6) return c2;
+        } catch (e) { /* browser lama */ }
+      }
+      return cv;
+    }
+    /** v1.25.1: kertas di dalam quad harus lebih terang dari rata frame
+     *  (bbox quad vs frame) — filter murah utk menolak quad bodong di meja gelap */
+    function quadBboxBrighter(gray, w, h, pts, frameMean) {
+      let x0 = w, y0 = h, x1 = 0, y1 = 0;
+      for (const p of pts) {
+        x0 = Math.max(0, Math.min(w - 1, Math.min(x0, p.x)));
+        y0 = Math.max(0, Math.min(h - 1, Math.min(y0, p.y)));
+        x1 = Math.max(0, Math.min(w - 1, Math.max(x1, p.x)));
+        y1 = Math.max(0, Math.min(h - 1, Math.max(y1, p.y)));
+      }
+      let s = 0, n = 0;
+      for (let y = Math.floor(y0); y <= y1; y += 2) {
+        for (let x = Math.floor(x0); x <= x1; x += 2) { s += gray[y * w + x]; n++; }
+      }
+      if (!n) return false;
+      const inside = s / n;
+      return inside >= frameMean + 3 && inside >= 50;
+    }
+
     async function doShutter(auto = false) {
       if (busy || finished || !video.videoWidth) return;
+      if (mode === 'pano') {
+        // v1.25.1: sweep kontinyu — jepret MULAI rekam, tekan lagi SELESAI
+        if (!panoSweep) await startPanoSweep();
+        else stopPanoSweep(true);
+        return;
+      }
       flash();
-      const frame = grabFrame();
+      const frame = await grabFrameGuarded();
       if (mode === 'photo') {
         finishCleanup();
         resolve({ cancelled: false, dataUrl: canvasToUrl(frame, 0.95), width: frame.width, height: frame.height, location: null });
         return;
       }
-      if (mode === 'pano') { await addPanoFrame(canvasToUrl(frame, 0.92)); return; }
       // mode doc → layar sesuaikan (crop 4 sudut)
       await openAdjust(frame, auto);
     }
@@ -316,14 +415,19 @@ export function openCameraScanner(opts = {}) {
       const detFull = resizeImg(getImageData(frameCanvas),
         Math.round(640 * frameCanvas.width / long),
         Math.round(640 * frameCanvas.height / long));
-      const r2 = detectQuad(detFull);
-      if (r2 && r2.confidence >= 0.3) {
+      const gFull = makeGray(detFull);
+      let gsum = 0;
+      for (let i = 0; i < gFull.length; i++) gsum += gFull[i];
+      const gMean = gsum / gFull.length;
+      const r2 = (gMean >= 45) ? detectQuad(detFull) : null; // guard scene gelap
+      if (r2 && r2.confidence >= 0.3 && quadBboxBrighter(gFull, detFull.width, detFull.height, r2.points, gMean)) {
         const s = Math.max(frameCanvas.width, frameCanvas.height) / Math.max(detFull.width, detFull.height);
         quad = r2.points.map(p => ({ x: p.x * s, y: p.y * s }));
       } else if (liveQuad) {
         quad = liveQuad.map(p => ({ ...p }));
       } else {
         quad = defaultQuad(frameCanvas.width, frameCanvas.height, 0.05);
+        if (gMean < 45) showToast('🌑 Cahaya kurang — geser 4 titik sudut & pertimbangkan ⚡ lampu', true);
       }
       setBusy(false);
       const verdict = await showAdjustScreen(frameCanvas, quad);
@@ -490,10 +594,17 @@ export function openCameraScanner(opts = {}) {
         showToast('Gagal merapikan: ' + e.message, true);
         return;
       }
+      // v1.25.1: hasil warp nyaris hitam = quad salah / cahaya kurang —
+      // peringatkan SEBELUM layar filter (user bisa ← balik & perbaiki sudut)
+      let wsum = 0;
+      const wd = warped.data;
+      for (let i = 0; i < wd.length; i += 4) wsum += (wd[i] * 77 + wd[i + 1] * 150 + wd[i + 2] * 29) >> 8;
+      const wMean = wsum / (wd.length / 4);
+      setBusy(false);
+      if (wMean < 45) showToast('⚠ Hasil gelap — atur 4 sudut / tambah cahaya lalu ulangi', true);
       const warpedCv = imgToCanvas(warped);
       const filter = 'enhance'; // default ala CamScanner — langsung terbaca
       const adj = { brightness: 0, contrast: 0 };
-      setBusy(false);
       await showEnhanceScreen(warpedCv, filter, adj);
     }
 
@@ -598,12 +709,16 @@ export function openCameraScanner(opts = {}) {
     }
 
     // ======================================================================
-    // PANORAMA — frame bertahap + stitch otomatis
+    // PANORAMA v1.25.1 — SWEEP KONTINYU ala kamera native:
+    // tekan jepret = mulai rekam (frame otomatis tiap 450ms), geser HP
+    // KANAN perlahan, tiap frame langsung disambung (ZSAD), tekan lagi =
+    // selesai. Frame yg gagal disambung DI-DIAMKAN (skip) — sweep tetap
+    // jalan, jangan galau user dgn error tiap detik.
     // ======================================================================
-    async function addPanoFrame(dataUrl) {
+    async function addPanoFrame(dataUrl, quiet = false) {
       if (stitching) return;
       stitching = true;
-      setBusy(true, panoAcc ? 'Menyambung foto…' : 'Menyiapkan panorama…');
+      if (!quiet) setBusy(true, panoAcc ? 'Menyambung foto…' : 'Menyiapkan panorama…');
       try {
         const img = await loadImg(dataUrl);
         if (!img) throw new Error('frame gagal dimuat');
@@ -619,20 +734,30 @@ export function openCameraScanner(opts = {}) {
           panoAcc = frameCv;
           panoAccGray = grayAt(panoAcc, 240);
           panoFrames.push(dataUrl);
-          showToast('✓ Frame 1 — geser KANAN lalu jepret lagi');
+          if (quiet) hintText.textContent = '🔄 Merekam… geser KANAN PERLAHAN';
+          else showToast('✓ Frame 1 — geser KANAN lalu jepret lagi');
         } else {
-          if (panoAcc.width + fw - 40 > PANO_MAX_W) {
+          if (panoAcc.width + fw - 8 > PANO_MAX_W) {
+            if (quiet) { stopPanoSweep(true); return; }
             showToast('Panorama sudah mencapai lebar maksimal', true);
           } else {
             // Cocokkan di skala rendah (cepat & tahan noise)
             const fGray = grayAt(frameCv, 240);
             const m = matchPanorama(panoAccGray, fGray);
             if (!m) {
-              showToast('Tidak sambung — geser lebih sedikit & jepret lagi', true);
+              // v1.25.1: di mode sweep JANGAN spam error — sekadar skip frame
+              if (quiet) {
+                if (Date.now() - slowHintAt > 2500) {
+                  slowHintAt = Date.now();
+                  hintText.textContent = '⏳ Terlewat — geser lebih LAMBAT…';
+                }
+              } else {
+                showToast('Tidak sambung — geser lebih sedikit & jepret lagi', true);
+              }
             } else {
               const scaleUp = PANO_H / panoAccGray.height;
               const overlap = Math.max(8, Math.round(m.overlap * scaleUp));
-              const dy = Math.round(m.dy * scaleUp);
+              const dy = Math.max(-Math.round(PANO_H * 0.15), Math.min(Math.round(PANO_H * 0.15), Math.round(m.dy * scaleUp)));
               const newW = panoAcc.width + fw - overlap;
               const acc = document.createElement('canvas');
               acc.width = newW; acc.height = PANO_H;
@@ -659,7 +784,11 @@ export function openCameraScanner(opts = {}) {
               panoAcc = acc;
               panoAccGray = grayAt(panoAcc, 240);
               panoFrames.push(dataUrl);
-              showToast(`✓ Tersambung (overlap ${overlap}px)`);
+              if (quiet) {
+                hintText.textContent = `🌐 ${panoAcc.width}px tersambung — terus geser…`;
+              } else {
+                showToast(`✓ Tersambung (overlap ${overlap}px)`);
+              }
             }
           }
         }
@@ -667,13 +796,47 @@ export function openCameraScanner(opts = {}) {
         showToast('Panorama: ' + e.message, true);
       } finally {
         stitching = false;
-        setBusy(false);
+        if (!quiet) setBusy(false);
         updateFinishUI();
         updateGuideBand();
       }
     }
 
-    /** pita alignment: strip kanan 25% dari akumulasi, ditampilkan di kanan viewfinder */
+    /** v1.25.1: MULAI sweep — jepret = mulai, tekan lagi = selesai */
+    async function startPanoSweep() {
+      if (panoSweep || stitching) return;
+      panoSweep = true;
+      shutterBtn.classList.add('sweeping');
+      shutterBtn.setAttribute('aria-label', 'Selesai panorama');
+      flash();
+      try {
+        const cv = await grabFrameGuarded();
+        await addPanoFrame(canvasToUrl(cv, 0.92), true);
+      } catch (e) { /* frame pertama gagal → tick berikutnya coba lagi */ }
+      panoTimer = setInterval(async () => {
+        if (!panoSweep || stitching || busy || finished || !video.videoWidth) return;
+        try {
+          const cv = await grabFrameGuarded();
+          await addPanoFrame(canvasToUrl(cv, 0.92), true);
+        } catch (e) { /* skip tick ini */ }
+      }, PANO_TICK);
+    }
+
+    /** v1.25.1: HENTIkan sweep; finish=true → langsung susun & keluar */
+    function stopPanoSweep(finish) {
+      if (panoTimer) { clearInterval(panoTimer); panoTimer = null; }
+      if (!panoSweep && !finish) return;
+      panoSweep = false;
+      shutterBtn.classList.remove('sweeping');
+      shutterBtn.setAttribute('aria-label', 'Jepret');
+      if (finish && panoAcc && !finished) {
+        finishPano();
+      } else if (mode === 'pano') {
+        hintText.textContent = 'Tekan jepret SEKALI lalu geser KANAN perlahan — tekan lagi utk selesai';
+      }
+    }
+
+    /** pita alignment: strip kanan dari akumulasi, ditampilkan di kanan viewfinder */
     function updateGuideBand() {
       if (mode !== 'pano' || !panoAcc) { guideBand.style.display = 'none'; return; }
       const stage = root.querySelector('.cs-stage');
@@ -688,7 +851,10 @@ export function openCameraScanner(opts = {}) {
     }
 
     async function finishPano() {
-      if (!panoAcc) return;
+      if (!panoAcc || finished) return;
+      if (panoTimer) { clearInterval(panoTimer); panoTimer = null; }
+      panoSweep = false;
+      shutterBtn.classList.remove('sweeping');
       setBusy(true, 'Menyusun panorama…');
       await new Promise(r => setTimeout(r, 30));
       try {
@@ -783,6 +949,7 @@ export function openCameraScanner(opts = {}) {
       const act = e.target.closest('[data-act]')?.dataset.act;
       if (!act) return;
       if (act === 'close') {
+        if (panoSweep) stopPanoSweep(false);
         const hasWork = (mode === 'doc' && pages.length) || (mode === 'pano' && panoAcc);
         if (hasWork && !confirm('Buang hasil yang sudah ada?')) return;
         finishCleanup();
@@ -813,6 +980,8 @@ export function openCameraScanner(opts = {}) {
     // ===== Cleanup & boot =====
     function finishCleanup() {
       finished = true;
+      if (panoTimer) { clearInterval(panoTimer); panoTimer = null; }
+      panoSweep = false;
       clearInterval(detTimer);
       stopStream();
       root.remove();
@@ -830,7 +999,7 @@ export function openCameraScanner(opts = {}) {
         if (startMode === 'doc') {
           hintText.textContent = 'Arahkan ke dokumen — tepi terdeteksi otomatis';
         } else if (startMode === 'pano') {
-          hintText.textContent = 'Jepret frame pertama, lalu geser KANAN perlahan';
+          hintText.textContent = 'Tekan jepret SEKALI lalu geser KANAN perlahan — tekan lagi utk selesai';
         } else {
           hintText.textContent = 'Jepret seperti biasa — hasil langsung disimpan';
         }
