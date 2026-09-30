@@ -104,3 +104,13 @@ auto-detect dijalankan di editor lama. Diperbaiki (paritas dgn orderQuad baru).
 - Regresi: test_rekon_desktop.mjs **43/43 PASS**; test_rekon_e2e.mjs **24/24
   PASS, 0 pageerror**.
 - `npm run build` (vite) sukses — bundle 541KB, precache 18 entries.
+
+## VALIDASI TAMBAHAN (E2E)
+
+- `scripts/test_camscanner_e2e.mjs` BARU — smoke test Playwright Chromium dgn
+  **kamera virtual** (`--use-fake-device-for-media-stream`) + seeded session:
+  **18/18 PASS** — sheet punya Scan Dokumen & Foto Panorama, kamera live terbuka,
+  video hidup (readyState≥2), 3 tab mode, auto-jepret ON, hint benar,
+  shutter/galeri/ganti kamera ada, pindah mode Panorama benar (pill auto
+  disembunyikan), tutup bersih, 0 pageerror kritis. Bukti visual:
+  download/camscanner-viewfinder.png & camscanner-panorama.png.
